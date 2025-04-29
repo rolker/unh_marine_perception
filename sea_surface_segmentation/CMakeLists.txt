@@ -9,10 +9,11 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(camera_info_manager REQUIRED)
 find_package(depthai CONFIG REQUIRED)
+find_package(depthai_bridge REQUIRED)
 find_package(lifecycle_msgs)
 find_package(rclcpp REQUIRED)
-find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
 add_executable(
@@ -22,9 +23,9 @@ add_executable(
 
 target_link_libraries(sea_surface_segmentation
   depthai::core
+  depthai_bridge::depthai_bridge
   rclcpp::rclcpp
-  rclcpp_lifecycle::rclcpp_lifecycle
-
+  ${sensor_msgs_TARGETS}
 
 )
 
@@ -34,3 +35,5 @@ install(TARGETS sea_surface_segmentation
 
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+
+ament_package()
