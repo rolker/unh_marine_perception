@@ -3,6 +3,7 @@
 
 #include "depthai_bridge/BridgePublisher.hpp"
 #include "depthai_bridge/ImageConverter.hpp"
+#include "depthai_bridge/depthaiUtility.hpp"
 
 
 #include "depthai/device/Device.hpp"
@@ -14,31 +15,6 @@
 
 #include "sensor_msgs/msg/image.hpp"
 
-
-void segmentationToRosMsg(const std::shared_ptr<dai::ADatatype>& data, std::deque<sensor_msgs::msg::Image>& outImageMsgs)
-{
-  auto in_det = std::dynamic_pointer_cast<dai::NNData>(data);
-
-  for(auto layer_name: in_det->getAllLayerNames())
-  std::cout << layer_name << std::endl;
-}
-
-void segmentationCallback(const std::string& /*name*/, const std::shared_ptr<dai::ADatatype>& data)
-{
-  std::cout << "segmentation callback" << std::endl;
-  auto in_det = std::dynamic_pointer_cast<dai::NNData>(data);
-
-  for(auto layer_name: in_det->getAllLayerNames())
-  std::cout << layer_name << std::endl;
-
-  auto layer_data = in_det->getLayerFp16("prediction");
-  std::cout << layer_data.size() << " data elements" << std::endl;
-  for(int i = 0; i < 10 && i < layer_data.size(); i++)
-    std::cout << layer_data[i] << ", ";
-  std::cout << std::endl;
-
-}
-
 class SeaSurfaceSegmentation: public rclcpp::Node
 {
 public:
@@ -49,6 +25,9 @@ public:
 
   void initialize()
   {
+    ros_base_time_ = get_clock()->now();
+    steady_base_time_ = std::chrono::steady_clock::now();
+    
     declare_parameter("neural_network", std::string());
     auto blob_path = get_parameter("neural_network").as_string();
 
@@ -119,8 +98,8 @@ public:
  
     auto calibration_handler = device_->readCalibration();
 
-    auto frame_id = get_parameter("frame_id").as_string();
-    image_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(frame_id, true);
+    frame_id_ = get_parameter("frame_id").as_string();
+    image_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(frame_id_, true);
     auto camera_info = image_converter_->calibrationToCameraInfo(calibration_handler, dai::CameraBoardSocket::CAM_A, 512, 384);
 
 
@@ -139,27 +118,60 @@ public:
 
     image_publisher_->addPublisherCallback();
 
-    segmentation_queue_->addCallback(&segmentationCallback);
+    segmentation_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(frame_id_, true);
+    segmentation_camera_info_ = segmentation_converter_->calibrationToCameraInfo(calibration_handler, dai::CameraBoardSocket::CAM_A, 128, 96);
 
-    //auto segmentation_camera_info = segmentation_converter_->calibrationToCameraInfo(calibration_handler, dai::CameraBoardSocket::CAM_A, 128, 96);
 
+    segmentation_publisher_ = std::make_shared<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ADatatype> >(
+      segmentation_queue_,
+      node,
+      camera_name+"/segmentation_raw",
+      std::bind(&SeaSurfaceSegmentation::segmentationCallback, this, std::placeholders::_1, std::placeholders::_2),
+      10,
+      segmentation_camera_info_,
+      camera_name,
+      false
+    );
 
-    // segmentation_publisher_ = std::make_shared<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ImgFrame> >(
-    //   segmentation_queue_,
-    //   node,
-    //   "segmentation_raw",
-    //   &segmentationToRosMsg,
-    //   10,
-    //   segmentation_camera_info,
-    //   camera_name,
-    //   false
-    // );
-
-    //segmentation_publisher_->addPublisherCallback();
+    segmentation_publisher_->addPublisherCallback();
 
   }
 
 private:
+
+  //void segmentationCallback(const std::string& /*name*/, const std::shared_ptr<dai::ADatatype>& data)
+  void segmentationCallback(std::shared_ptr<dai::ADatatype> data, std::deque<sensor_msgs::msg::Image>& outImageMsgs)
+  {
+    auto in_det = std::dynamic_pointer_cast<dai::NNData>(data);
+
+    auto layer_data = in_det->getLayerFp16("prediction");
+
+    sensor_msgs::msg::Image image_message;
+    image_message.header.frame_id = frame_id_;
+
+    std::chrono::_V2::steady_clock::time_point tstamp = in_det->getTimestamp();
+
+    image_message.header.stamp = dai::ros::getFrameTime(ros_base_time_, steady_base_time_, tstamp);
+    image_message.height = 96;
+    image_message.width = 128;
+    image_message.step = image_message.width*3;
+    image_message.encoding = "rgb8";
+
+    auto image_area = image_message.width * image_message.height;
+
+    for(std::size_t i = 0; i < layer_data.size()/3; i++)
+    {
+      double sum = 0.0;
+      for(int j = 0; j < 3; j++)
+        sum += exp(layer_data[i+j*image_area]);
+      for(int j = 0; j < 3; j++)
+        image_message.data.push_back(255*exp(layer_data[i+j*image_area])/sum);
+    }
+
+    outImageMsgs.push_back(image_message);
+  }
+
+
   std::shared_ptr<dai::Pipeline> pipeline_;
   std::shared_ptr<dai::node::NeuralNetwork> neural_network_;
   std::shared_ptr<dai::node::ColorCamera> camera_;
@@ -173,7 +185,14 @@ private:
   std::shared_ptr<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ImgFrame> > image_publisher_;
 
   std::shared_ptr<dai::rosBridge::ImageConverter> segmentation_converter_;
-  std::shared_ptr<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ImgFrame> > segmentation_publisher_;
+  std::shared_ptr<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ADatatype> > segmentation_publisher_;
+
+  sensor_msgs::msg::CameraInfo segmentation_camera_info_;
+  std::string frame_id_;
+
+  rclcpp::Time ros_base_time_;
+  std::chrono::time_point<std::chrono::steady_clock> steady_base_time_;
+
 
 };
 
