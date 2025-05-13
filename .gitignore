@@ -1,1 +1,1 @@
-sea_surface_segmentation/config/ewasr_resnet18.blob
+sea_surface_segmentation/config/*.blob
