@@ -12,9 +12,13 @@ find_package(ament_cmake REQUIRED)
 find_package(camera_info_manager REQUIRED)
 find_package(depthai CONFIG REQUIRED)
 find_package(depthai_bridge REQUIRED)
+find_package(image_geometry REQUIRED)
 find_package(lifecycle_msgs)
+find_package(pcl_conversions REQUIRED)
+find_package(pcl_ros REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 add_executable(
   sea_surface_segmentation
@@ -30,6 +34,28 @@ target_link_libraries(sea_surface_segmentation
 )
 
 install(TARGETS sea_surface_segmentation
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+add_executable(
+  segments_to_pointcloud
+  src/segments_to_pointcloud.cpp
+)
+
+target_link_libraries(segments_to_pointcloud
+  image_geometry::image_geometry
+  rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
+  tf2_ros::tf2_ros
+  ${sensor_msgs_TARGETS}
+
+)
+
+ament_target_dependencies(segments_to_pointcloud
+  pcl_ros
+)
+
+install(TARGETS segments_to_pointcloud
   DESTINATION lib/${PROJECT_NAME}
 )
 
