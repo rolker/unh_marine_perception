@@ -87,13 +87,17 @@ private:
         camera_origin.header = segments_msg->header;
         camera_origin.pose.orientation.w = 1.0; // Identity orientation
         geometry_msgs::msg::PoseStamped camera_origin_map;
-        tf2::doTransform(camera_origin_map, camera_origin, transform);
+        RCLCPP_INFO_STREAM(get_logger(), "transform: " << to_yaml(transform));
+        tf2::doTransform(camera_origin, camera_origin_map, transform);
         auto p1 = camera_origin_map.pose.position;
 
+        RCLCPP_INFO_STREAM(get_logger(), "Camera origin in map frame: "
+            << p1.x << ", " << p1.y << ", " << p1.z);
+
         std::vector<cv::Point2d> test_points;
-        test_points.push_back(cv::Point2d(0.5, 0.9));
-        test_points.push_back(cv::Point2d(0.5, 0.95));
-        test_points.push_back(cv::Point2d(0.4, 0.9));
+        test_points.push_back(cv::Point2d(0.5*camera_model_->cameraInfo().width , 0.9*camera_model_->cameraInfo().height));
+        test_points.push_back(cv::Point2d(0.5*camera_model_->cameraInfo().width, 0.95*camera_model_->cameraInfo().height));
+        test_points.push_back(cv::Point2d(0.4*camera_model_->cameraInfo().width, 0.9*camera_model_->cameraInfo().height));
 
         pcl::PointCloud<pcl::PointXYZI>::Ptr targets(
           new pcl::PointCloud<pcl::PointXYZI>);
@@ -101,7 +105,9 @@ private:
     
         for(const auto & pixel: test_points)
         {
+          RCLCPP_INFO_STREAM(get_logger(), "Processing pixel: " << pixel.x << ", " << pixel.y);
           auto ray = camera_model_->projectPixelTo3dRay(pixel);
+          RCLCPP_INFO_STREAM(get_logger(), "Ray: " << ray.x << ", " << ray.y << ", " << ray.z);
           geometry_msgs::msg::PoseStamped ray_pose;
           ray_pose.header = segments_msg->header;
           ray_pose.pose.position.x = ray.x;
@@ -110,8 +116,10 @@ private:
           ray_pose.pose.orientation.w = 1.0;
     
           geometry_msgs::msg::PoseStamped ray_pose_map;
-          tf2::doTransform(ray_pose_map, ray_pose, transform);
+          tf2::doTransform(ray_pose, ray_pose_map, transform);
           auto p2 = ray_pose_map.pose.position;
+          RCLCPP_INFO_STREAM(get_logger(), "Ray end in map frame: "
+              << p2.x << ", " << p2.y << ", " << p2.z);
 
           // ground plane eq: z=0
           // line eq: P=p1+u(p2-p1)
@@ -127,6 +135,8 @@ private:
           point.y = py;
           point.z = 0.0;
           point.intensity = 1.0;
+          RCLCPP_INFO_STREAM(get_logger(), "Intersecting point in map frame: "
+              << point.x << ", " << point.y << ", " << point.z);
           targets->push_back(point);
         }
 
@@ -141,7 +151,7 @@ private:
       }
       catch(const std::exception& e)
       {
-        std::cerr << e.what() << '\n';
+        RCLCPP_WARN_STREAM(get_logger(), e.what());
       }
     }
   }
