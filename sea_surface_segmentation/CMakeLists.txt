@@ -10,6 +10,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(camera_info_manager REQUIRED)
+find_package(cv_bridge REQUIRED)
 find_package(depthai CONFIG REQUIRED)
 find_package(depthai_bridge REQUIRED)
 find_package(image_geometry REQUIRED)
@@ -52,6 +53,7 @@ target_link_libraries(segments_to_pointcloud
 )
 
 ament_target_dependencies(segments_to_pointcloud
+  cv_bridge
   pcl_ros
 )
 
