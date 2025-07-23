@@ -96,9 +96,6 @@ private:
         auto image = cv_bridge::toCvShare(segments_msg, "rgb8");
 
         std::vector<cv::Point2d> target_pixels;
-        // test_points.push_back(cv::Point2d(0.5*camera_model_->cameraInfo().width , 0.9*camera_model_->cameraInfo().height));
-        // test_points.push_back(cv::Point2d(0.5*camera_model_->cameraInfo().width, 0.95*camera_model_->cameraInfo().height));
-        // test_points.push_back(cv::Point2d(0.4*camera_model_->cameraInfo().width, 0.9*camera_model_->cameraInfo().height));
 
         pcl::PointCloud<pcl::PointXYZI>::Ptr targets(
           new pcl::PointCloud<pcl::PointXYZI>);
@@ -110,7 +107,7 @@ private:
           {
             auto pixel = cv::Point2d(col, row);
             auto pixel_value = image->image.at<cv::Vec3b>(row, col);
-            if(pixel_value[1] > 128)
+            if(pixel_value[0] > pixel_value[1] && pixel_value[0] > pixel_value[2])
             {
               target_pixels.push_back(pixel);
             }
@@ -141,7 +138,7 @@ private:
           // u = -p1.z/(p2.z-p1.z)
 
           double u = -p1.z / (p2.z - p1.z);
-          if(u>0.0 || u < 0.0)
+          if(u>0.0)
           {
             auto px = p1.x+ u * (p2.x - p1.x);
             auto py = p1.y+ u * (p2.y - p1.y);
