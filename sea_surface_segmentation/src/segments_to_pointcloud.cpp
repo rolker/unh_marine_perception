@@ -95,8 +95,6 @@ private:
 
         auto image = cv_bridge::toCvShare(segments_msg, "rgb8");
 
-        std::vector<cv::Point2d> target_pixels;
-
         pcl::PointCloud<pcl::PointXYZI>::Ptr targets(
           new pcl::PointCloud<pcl::PointXYZI>);
         targets->header.frame_id = map_frame_;
@@ -109,50 +107,47 @@ private:
             auto pixel_value = image->image.at<cv::Vec3b>(row, col);
             if(pixel_value[0] > pixel_value[1] && pixel_value[0] > pixel_value[2])
             {
-              target_pixels.push_back(pixel);
+    
+              //RCLCPP_INFO_STREAM(get_logger(), "Processing pixel: " << pixel.x << ", " << pixel.y);
+              auto ray = camera_model_->projectPixelTo3dRay(pixel);
+              //RCLCPP_INFO_STREAM(get_logger(), "Ray: " << ray.x << ", " << ray.y << ", " << ray.z);
+              geometry_msgs::msg::PoseStamped ray_pose;
+              ray_pose.header = segments_msg->header;
+              ray_pose.pose.position.x = ray.x;
+              ray_pose.pose.position.y = ray.y;
+              ray_pose.pose.position.z = ray.z;
+              ray_pose.pose.orientation.w = 1.0;
+        
+              geometry_msgs::msg::PoseStamped ray_pose_map;
+              tf2::doTransform(ray_pose, ray_pose_map, transform);
+              auto p2 = ray_pose_map.pose.position;
+              //RCLCPP_INFO_STREAM(get_logger(), "Ray end in map frame: "
+              //    << p2.x << ", " << p2.y << ", " << p2.z);
+
+              // ground plane eq: z=0
+              // line eq: P=p1+u(p2-p1)
+              // P.z = p1.z+u(p2.z-p1.z) = 0
+              // u = -p1.z/(p2.z-p1.z)
+
+              double u = -p1.z / (p2.z - p1.z);
+              if(u>0.0)
+              {
+                auto px = p1.x+ u * (p2.x - p1.x);
+                auto py = p1.y+ u * (p2.y - p1.y);
+
+                pcl::PointXYZI point;
+                point.x = px;
+                point.y = py;
+                point.z = 0.0;
+                point.intensity = pixel_value[0];
+                //RCLCPP_INFO_STREAM(get_logger(), "Intersecting point in map frame: "
+                //    << point.x << ", " << point.y << ", " << point.z);
+                targets->push_back(point);
+              }
             }
           }
         }
-    
-        for(const auto & pixel: target_pixels)
-        {
-          //RCLCPP_INFO_STREAM(get_logger(), "Processing pixel: " << pixel.x << ", " << pixel.y);
-          auto ray = camera_model_->projectPixelTo3dRay(pixel);
-          //RCLCPP_INFO_STREAM(get_logger(), "Ray: " << ray.x << ", " << ray.y << ", " << ray.z);
-          geometry_msgs::msg::PoseStamped ray_pose;
-          ray_pose.header = segments_msg->header;
-          ray_pose.pose.position.x = ray.x;
-          ray_pose.pose.position.y = ray.y;
-          ray_pose.pose.position.z = ray.z;
-          ray_pose.pose.orientation.w = 1.0;
-    
-          geometry_msgs::msg::PoseStamped ray_pose_map;
-          tf2::doTransform(ray_pose, ray_pose_map, transform);
-          auto p2 = ray_pose_map.pose.position;
-          //RCLCPP_INFO_STREAM(get_logger(), "Ray end in map frame: "
-          //    << p2.x << ", " << p2.y << ", " << p2.z);
 
-          // ground plane eq: z=0
-          // line eq: P=p1+u(p2-p1)
-          // P.z = p1.z+u(p2.z-p1.z) = 0
-          // u = -p1.z/(p2.z-p1.z)
-
-          double u = -p1.z / (p2.z - p1.z);
-          if(u>0.0)
-          {
-            auto px = p1.x+ u * (p2.x - p1.x);
-            auto py = p1.y+ u * (p2.y - p1.y);
-
-            pcl::PointXYZI point;
-            point.x = px;
-            point.y = py;
-            point.z = 0.0;
-            point.intensity = 1.0;
-            //RCLCPP_INFO_STREAM(get_logger(), "Intersecting point in map frame: "
-            //    << point.x << ", " << point.y << ", " << point.z);
-            targets->push_back(point);
-          }
-        }
 
         pcl_conversions::toPCL(segments_msg->header.stamp, targets->header.stamp);
 
