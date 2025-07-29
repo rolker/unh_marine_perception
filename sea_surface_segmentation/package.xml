@@ -14,10 +14,12 @@
   <depend>depthai</depend>
   <depend>depthai_bridge</depend>
   <depend>image_geometry</depend>
-  <depend>rclcpp</depend>
-  <depend>sensor_msgs</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>pluginlib</depend>
   <depend>pcl_conversions</depend>
   <depend>pcl_ros</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
 
 
   <export>

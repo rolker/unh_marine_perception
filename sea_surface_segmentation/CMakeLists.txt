@@ -15,8 +15,10 @@ find_package(depthai CONFIG REQUIRED)
 find_package(depthai_bridge REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(lifecycle_msgs)
+find_package(nav2_costmap_2d REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
+find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -59,6 +61,30 @@ ament_target_dependencies(segments_to_pointcloud
 
 install(TARGETS segments_to_pointcloud
   DESTINATION lib/${PROJECT_NAME}
+)
+
+add_library("sea_surface_layer" SHARED
+  src/sea_surface_layer.cpp
+)
+add_library("sea_surface_layer::sea_surface_layer" ALIAS "sea_surface_layer")
+
+target_link_libraries(sea_surface_layer 
+  image_geometry::image_geometry
+  nav2_costmap_2d::nav2_costmap_2d_core
+  rclcpp::rclcpp
+  tf2_ros::tf2_ros
+)
+
+ament_target_dependencies(sea_surface_layer
+  cv_bridge
+)
+
+pluginlib_export_plugin_description_file(nav2_costmap_2d costmap_plugins.xml)
+
+install(
+  TARGETS sea_surface_layer
+  EXPORT export_sea_surface_layer
+  DESTINATION lib
 )
 
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})

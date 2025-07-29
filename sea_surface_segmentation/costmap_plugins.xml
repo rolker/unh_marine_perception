@@ -1,0 +1,5 @@
+<library path="sea_surface_layer">
+  <class type="sea_surface_layer::SeaSurfaceLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>A sea surface segmentation layer for costmap_2d</description>
+  </class>
+</library>

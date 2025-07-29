@@ -1,0 +1,242 @@
+
+#include "cv_bridge/cv_bridge.hpp"
+#include "geometry_msgs/msg/point_stamped.hpp"
+#include "image_geometry/pinhole_camera_model.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
+#include "sensor_msgs/msg/image.hpp"
+#include "nav2_costmap_2d/layer.hpp"
+#include "nav2_costmap_2d/layered_costmap.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+
+namespace sea_surface_layer
+{
+
+class SeaSurfaceLayer: public nav2_costmap_2d::Layer
+{
+public:
+  SeaSurfaceLayer()
+  {}
+
+  ~SeaSurfaceLayer()
+  {}
+
+  void onInitialize() override
+  {
+    auto node = node_.lock();
+
+    declareParameter("maximum_range", rclcpp::ParameterValue(maximum_range_));
+    node->get_parameter(name_+".maximum_range", maximum_range_);
+
+
+    declareParameter("segmentation_topic", rclcpp::ParameterValue("segmentation"));
+    std::string segmentation_topic;
+    node->get_parameter(name_+".segmentation_topic", segmentation_topic);
+    declareParameter("camera_info_topic", rclcpp::ParameterValue("camera_info"));
+    std::string camera_info_topic;
+    node->get_parameter(name_+".camera_info_topic", camera_info_topic);
+
+    segments_subscriber_ = node->create_subscription<sensor_msgs::msg::Image>(
+      segmentation_topic,
+      rclcpp::SensorDataQoS(),
+      std::bind(&SeaSurfaceLayer::segmentsCallback, this, std::placeholders::_1)
+    );
+
+    camera_info_subscriber_ = node->create_subscription<sensor_msgs::msg::CameraInfo>(
+      camera_info_topic,
+      rclcpp::SensorDataQoS(),
+      std::bind(&SeaSurfaceLayer::cameraInfoCallback, this, std::placeholders::_1)
+    );
+
+    global_frame_id_ = layered_costmap_->getGlobalFrameID();
+
+    matchSize();
+
+  }
+
+  void reset() override
+  {
+    segments_costmap_.resetMapToValue(0, 0, count_x_-1, count_y_-1, nav2_costmap_2d::NO_INFORMATION);
+  }
+
+  bool isClearable() override { return false; }
+
+  void updateBounds(
+    double robot_x, double robot_y, double robot_yaw,
+    double* min_x, double* min_y,
+    double* max_x, double* max_y) override
+
+  {
+   // if(updated_)
+    {
+      *min_x = robot_x - maximum_range_;
+      *min_y = robot_y - maximum_range_;
+      *max_x = robot_x + maximum_range_;
+      *max_y = robot_y + maximum_range_;
+      updated_ = false;
+    }
+
+    auto parent = layered_costmap_->getCostmap();
+
+    if(parent->getSizeInCellsX() != segments_costmap_.getSizeInCellsX() ||
+      parent->getSizeInCellsY() != segments_costmap_.getSizeInCellsY() ||
+      parent->getOriginX() != segments_costmap_.getOriginX() ||
+      parent->getOriginY() != segments_costmap_.getOriginY() ||
+      parent->getResolution() != segments_costmap_.getResolution()
+    )
+    {
+      matchSize();
+    }
+  }
+
+  void updateCosts(
+    nav2_costmap_2d::Costmap2D& master_grid,
+    int min_i, int min_j, int max_i, int max_j)  override
+  {
+    std::lock_guard<std::mutex> lock(costmap_mutex_);
+    for(int i = min_i; i <= max_i; ++i)
+    {
+      for(int j = min_j; j <= max_j; ++j)
+      {
+        unsigned char cost = segments_costmap_.getCost(i, j);
+        if(cost != nav2_costmap_2d::NO_INFORMATION)
+        {
+          if(cost > master_grid.getCost(i, j))
+          {
+            master_grid.setCost(i, j, cost);
+          }
+        }
+      }
+    }
+  }
+
+  void matchSize() override
+  {
+    RCLCPP_INFO_STREAM(logger_, "Matching size of SeaSurfaceLayer to parent costmap");
+    auto parent = layered_costmap_->getCostmap();
+    
+    origin_x_ = parent->getOriginX();
+    origin_y_ = parent->getOriginY();
+    resolution_ = parent->getResolution();
+    count_x_ = parent->getSizeInCellsX();
+    count_y_ = parent->getSizeInCellsY();
+
+    segments_costmap_.resizeMap(count_x_, count_y_, resolution_, origin_x_, origin_y_);
+  }
+
+private:
+  std::string global_frame_id_;
+
+  double update_timeout_ = 0.5;
+
+  bool updated_ = false;
+
+  void segmentsCallback(const sensor_msgs::msg::Image::SharedPtr segments_msg)
+  {
+    if(camera_model_)
+    {
+
+      try
+      {
+      
+        auto transform = tf_->lookupTransform(
+          segments_msg->header.frame_id, global_frame_id_, segments_msg->header.stamp, std::chrono::seconds(1));
+
+        auto image = cv_bridge::toCvShare(segments_msg, "rgb8");
+
+
+        std::lock_guard<std::mutex> lock(costmap_mutex_);
+
+        segments_costmap_.resetMapToValue(0, 0, count_x_-1, count_y_-1, nav2_costmap_2d::NO_INFORMATION);
+
+        for(unsigned int i = 0; i < count_x_; i++)
+        {
+          for(unsigned int j = 0; j < count_y_; j++)
+          {
+            double map_x, map_y;
+            segments_costmap_.mapToWorld(i, j, map_x, map_y);
+            geometry_msgs::msg::PointStamped point_in_map;
+            point_in_map.point.x = map_x;
+            point_in_map.point.y = map_y;
+            point_in_map.point.z = 0.0;
+            point_in_map.header.frame_id = global_frame_id_;
+            point_in_map.header.stamp = segments_msg->header.stamp;
+            geometry_msgs::msg::PointStamped point_in_camera;
+            tf2::doTransform(point_in_map, point_in_camera, transform);
+
+            if(point_in_camera.point.z < 0.0)
+            {
+              continue; // Skip points behind the camera
+            }
+
+            auto ray_length = sqrt(point_in_camera.point.x * point_in_camera.point.x +
+                                      point_in_camera.point.y * point_in_camera.point.y +
+                                      point_in_camera.point.z * point_in_camera.point.z);
+
+            if(ray_length > maximum_range_)
+            {
+              continue;
+            }
+
+            auto pixel = camera_model_->project3dToPixel(cv::Point3d(
+              point_in_camera.point.x, point_in_camera.point.y, point_in_camera.point.z));
+            
+            if(pixel.x >= 0 && pixel.x < static_cast<int>(image->image.cols) &&
+               pixel.y >= 0 && pixel.y < static_cast<int>(image->image.rows))
+            {
+              auto pixel_value = image->image.at<cv::Vec3b>(pixel);
+              if(pixel_value[0] > pixel_value[1] && pixel_value[0] > pixel_value[2])
+              {
+                segments_costmap_.setCost(i, j, nav2_costmap_2d::LETHAL_OBSTACLE);
+              }
+              else
+              {
+                segments_costmap_.setCost(i, j, nav2_costmap_2d::FREE_SPACE);
+              }
+            }
+          }
+        }
+        updated_ = true;
+      }
+      catch(const std::exception& e)
+      {
+        RCLCPP_WARN_STREAM(logger_, e.what());
+      }
+    }
+  }
+
+  void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr camera_info_msg)
+  {
+    camera_info_ = *camera_info_msg;
+    if(!camera_model_) {
+      camera_model_ = std::make_shared<image_geometry::PinholeCameraModel>();
+    }
+    camera_model_->fromCameraInfo(camera_info_);
+  }
+
+
+  double origin_x_ = 0.0;
+  double origin_y_ = 0.0;
+  double resolution_ = 1.0;
+  unsigned int count_x_ = 0;
+  unsigned int count_y_ = 0;
+
+  nav2_costmap_2d::Costmap2D segments_costmap_;
+
+  double maximum_range_ = 100.0;
+
+
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr segments_subscriber_;
+  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscriber_;
+
+
+  sensor_msgs::msg::CameraInfo camera_info_;
+  std::shared_ptr<image_geometry::PinholeCameraModel> camera_model_;
+
+  std::mutex costmap_mutex_;
+
+};
+
+} // namespace sea_surface_layer
+
+#include "pluginlib/class_list_macros.hpp"
+PLUGINLIB_EXPORT_CLASS(sea_surface_layer::SeaSurfaceLayer, nav2_costmap_2d::Layer)
