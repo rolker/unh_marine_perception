@@ -60,6 +60,7 @@ public:
     camera_->setPreviewSize(512, 384);
     camera_->setFps(5);
     camera_->setSize(1280, 720);
+    
 
     image_manip_ = pipeline_->create<dai::node::ImageManip>();
     image_manip_->initialConfig.setFrameType(dai::ImgFrame::Type::BGR888p);

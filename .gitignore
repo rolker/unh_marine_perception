@@ -1,1 +1,2 @@
 sea_surface_segmentation/config/*.blob
+depthai_marine/config/*.blob
