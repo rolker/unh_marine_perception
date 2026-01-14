@@ -1,102 +1,12 @@
 #include "rclcpp/rclcpp.hpp"
-#include "depthai/depthai.hpp"
-#include "depthai_bridge/BridgePublisher.hpp"
-#include "depthai_bridge/ImageConverter.hpp"
-#include "depthai_bridge/DisparityConverter.hpp"
+#include "depthai_marine/camera_base.hpp"
 
-
-class ImagePublisher
-{
-public:
-  ImagePublisher(std::shared_ptr<rclcpp::Node> node, std:: shared_ptr<dai::Device> device, std::string queue_name, std::string topic_name)
-  {
-    camera_queue_ = device->getOutputQueue(queue_name, 5, false);
-
-    auto calibration_handler = device->readCalibration();
-    image_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(topic_name, true);
-
-    auto camera_info = image_converter_->calibrationToCameraInfo(calibration_handler, dai::CameraBoardSocket::CAM_A, 1280, 720);
-
-    image_publisher_ = std::make_shared<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ImgFrame> >(
-      camera_queue_,
-      node,
-      topic_name+"/image_raw",
-      std::bind(&dai::ros::ImageConverter::toRosMsg, image_converter_.get(), std::placeholders::_1, std::placeholders::_2),
-      10,
-      camera_info,
-      topic_name,
-      false
-    );
-
-    image_publisher_->addPublisherCallback();
-  }
-
-private:
-  std::shared_ptr<dai::DataOutputQueue> camera_queue_;
-
-  std::shared_ptr<dai::ros::ImageConverter> image_converter_;
-  std::shared_ptr<dai::ros::BridgePublisher<sensor_msgs::msg::Image, dai::ImgFrame> > image_publisher_;
-};
-
-
-class CameraBase
-{
-public:
-  CameraBase(std::shared_ptr<rclcpp::Node> node)
-  : node_(node)
-  {
-  }
-
-  void initialize(std::string id, std::string label)
-  {
-    auto pipeline = getPipeline();
-    device_ = std::make_shared<dai::Device>(*pipeline, dai::DeviceInfo(id), false);
-
-    RCLCPP_INFO_STREAM(node_->get_logger(), label << ": Connected to device: " <<  device_->getDeviceInfo().toString());
-
-    camera_publisher_ = std::make_shared<ImagePublisher>(node_, device_, "camera", label);
-  }
-
-  virtual ~CameraBase()
-  {
-  }
-
-  virtual std::shared_ptr<dai::Pipeline> getPipeline()
-  {
-    auto pipeline = std::make_shared<dai::Pipeline>();
-    camera_ = pipeline->create<dai::node::Camera>();
-    camera_->setImageOrientation(dai::CameraImageOrientation::ROTATE_180_DEG);
-    camera_->setPreviewSize(1280, 720);
-    camera_->setSize(1280, 720);
-
-    auto camera_xlink_out = pipeline->create<dai::node::XLinkOut>();
-    camera_xlink_out->setStreamName("camera");
-    camera_xlink_out->input.setBlocking(false);
-
-    camera_->preview.link(camera_xlink_out->input);
-
-    return pipeline;
-  }
-
-protected:
-  std::shared_ptr<dai::node::Camera> camera_;
-
-  std::shared_ptr<rclcpp::Node> node_;
-  std::shared_ptr<dai::Device> device_;
-
-private:
-  std::shared_ptr<ImagePublisher> camera_publisher_;
-
-};
-
-
-
-class MainCamera: public CameraBase
+class MainCamera: public depthai_marine::CameraBase
 {
 
 public:
   MainCamera(std::shared_ptr<rclcpp::Node> node, std::string id):
-    CameraBase(node)
+    depthai_marine::CameraBase(node)
   {
     initialize(id, "right");
     // depth_publisher_ = std::make_shared<ImagePublisher>(node, device_, "depth", "depth");
@@ -106,7 +16,7 @@ public:
 
   virtual std::shared_ptr<dai::Pipeline> getPipeline() override
   {
-    auto pipeline = CameraBase::getPipeline();
+    auto pipeline = depthai_marine::CameraBase::getPipeline();
 
     // auto sync = pipeline->create<dai::node::Sync>();
     // sync->setSyncThreshold(std::chrono::milliseconds(100));
@@ -139,16 +49,16 @@ public:
   }
 
 private:
-  std::shared_ptr<ImagePublisher> depth_publisher_;
+  // std::shared_ptr<depthai_marine::ImagePublisher> depth_publisher_;
   std::shared_ptr<dai::DataInputQueue> left_image_in_queue_;
 
 };
 
-class SecondaryCamera: public CameraBase
+class SecondaryCamera: public depthai_marine::CameraBase
 {
 public:
   SecondaryCamera(std::shared_ptr<rclcpp::Node> node, std::string id):
-    CameraBase(node)
+    depthai_marine::CameraBase(node)
   {
     initialize(id, "left");
     left_image_out_queue_ = device_->getOutputQueue("left_out", 8, false);
@@ -156,7 +66,7 @@ public:
 
   virtual std::shared_ptr<dai::Pipeline> getPipeline() override
   {
-    auto pipeline = CameraBase::getPipeline();
+    auto pipeline = depthai_marine::CameraBase::getPipeline();
 
     auto left_xlink_out = pipeline->create<dai::node::XLinkOut>();
     left_xlink_out->setStreamName("left_out");
@@ -216,7 +126,6 @@ private:
 
   std::shared_ptr<MainCamera> right_camera_;
   std::shared_ptr<SecondaryCamera> left_camera_;
-
 
 };
 

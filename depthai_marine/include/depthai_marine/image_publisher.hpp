@@ -1,0 +1,21 @@
+#pragma once
+
+#include "rclcpp/rclcpp.hpp"
+#include "depthai/depthai.hpp"
+#include "depthai_bridge/BridgePublisher.hpp"
+#include "depthai_bridge/ImageConverter.hpp"
+
+namespace depthai_marine {
+
+class ImagePublisher
+{
+public:
+  ImagePublisher(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<dai::Device> device, std::string queue_name, std::string topic_name);
+
+private:
+  std::shared_ptr<dai::DataOutputQueue> camera_queue_;
+  std::shared_ptr<dai::ros::ImageConverter> image_converter_;
+  std::shared_ptr<dai::ros::BridgePublisher<sensor_msgs::msg::Image, dai::ImgFrame> > image_publisher_;
+};
+
+} // namespace depthai_marine

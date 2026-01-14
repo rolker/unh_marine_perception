@@ -13,6 +13,7 @@
   <depend>cv_bridge</depend>
   <depend>depthai</depend>
   <depend>depthai_bridge</depend>
+  <depend>depthai_marine</depend>
   <depend>image_geometry</depend>
   <depend>nav2_costmap_2d</depend>
   <depend>pluginlib</depend>

@@ -13,6 +13,7 @@ find_package(camera_info_manager REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(depthai CONFIG REQUIRED)
 find_package(depthai_bridge REQUIRED)
+find_package(depthai_marine REQUIRED)
 find_package(image_geometry REQUIRED)
 find_package(lifecycle_msgs)
 find_package(nav2_costmap_2d REQUIRED)
@@ -31,6 +32,7 @@ add_executable(
 target_link_libraries(sea_surface_segmentation
   depthai::core
   depthai_bridge::depthai_bridge
+  depthai_marine::depthai_marine_lib
   rclcpp::rclcpp
   ${sensor_msgs_TARGETS}
 

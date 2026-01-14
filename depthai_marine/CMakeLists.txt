@@ -17,6 +17,24 @@ find_package(lifecycle_msgs)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
+add_library(depthai_marine_lib
+  src/camera_base.cpp
+  src/image_publisher.cpp
+)
+
+target_include_directories(depthai_marine_lib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(depthai_marine_lib
+  depthai::core
+  depthai::opencv
+  depthai_bridge::depthai_bridge
+  rclcpp::rclcpp
+  ${sensor_msgs_TARGETS}
+)
+
 add_executable(
   list_devices
   src/list_devices.cpp
@@ -64,18 +82,38 @@ add_executable(
 )
 
 target_link_libraries(wide_stereo
-  depthai::core
-  depthai::opencv
-  depthai_bridge::depthai_bridge
-  rclcpp::rclcpp
-  ${sensor_msgs_TARGETS}
+  depthai_marine_lib
 )
 
 install(TARGETS wide_stereo
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(TARGETS depthai_marine_lib
+  EXPORT depthai_marine_lib
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  INCLUDES DESTINATION include
+)
+
+install(DIRECTORY include/ DESTINATION include)
+
+install(EXPORT depthai_marine_lib
+  DESTINATION share/${PROJECT_NAME}
+  FILE depthai_marine_lib.cmake
+)
+
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+
+ament_export_targets(depthai_marine_lib)
+ament_export_include_directories(include)
+ament_export_dependencies(
+  depthai
+  depthai_bridge
+  rclcpp
+  sensor_msgs
+)
 
 ament_package()
