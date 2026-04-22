@@ -14,21 +14,28 @@ Opt-in — default behavior is unchanged.
 |---|---|---|---|
 | `<camera>/image_raw/ffmpeg` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | `rclcpp::SensorDataQoS()` (BEST_EFFORT, depth 5) | Published when `h265_enable = true`. |
 
-Field mapping on each `FFMPEGPacket`:
+Conversion from `dai::EncodedFrame` (the output of `dai::node::VideoEncoder::out`)
+to `FFMPEGPacket` is handled by `dai::ros::ImageConverter::toRosFFMPEGPacket` —
+the same `ImageConverter` class that produces the sibling `sensor_msgs/Image`.
+This is important: `ImageConverter` captures a steady-clock → ROS-time base
+offset at construction, so both topics' `header.stamp` land in the same ROS
+time domain. Downstream consumers doing cross-stream sync (bag replay,
+`message_filters::TimeSynchronizer`, operator dashboards) see matched
+timestamps for each physical frame.
 
-- `header.stamp` — ROS time derived from `dai::ImgFrame::getTimestamp()`.
-  Same source the sibling `sensor_msgs/Image` uses via
-  `dai::ros::ImageConverter::toRosMsg`, so the two time signals on the
-  packet remain consistent.
-- `width` / `height` — the `video_width` / `video_height` ROS params.
-- `encoding` — `"hevc"` for H.265 profiles, `"h264"` for H.264 profiles.
-  These are the canonical codec names `ffmpeg_encoder_decoder::Decoder`
-  expects for `findDecoders()` lookup.
-- `pts` — device-timestamp microseconds (`AV_TIME_BASE`-native). Monotonic
-  across the stream.
-- `flags` — keyframe bit (`0x01`) when the first NAL unit is an H.264 IDR
-  (NAL type 5) or HEVC IRAP (NAL types 16-23). `0x00` otherwise.
-- `is_bigendian` — always false.
+Field mapping on each `FFMPEGPacket` (filled in by `toRosFFMPEGPacket`):
+
+- `header.stamp` — ROS time, base-offset from `EncodedFrame::getTimestamp()`.
+- `header.frame_id` — the camera label passed to `H265Publisher` (same as the
+  sibling `sensor_msgs/Image`'s `frame_id`).
+- `width` / `height` — from `EncodedFrame::getWidth()` / `getHeight()`.
+- `encoding` — `"hevc"` for H.265 profiles, `"h264"` for H.264 profiles;
+  configured via `ImageConverter::setFFMPEGEncoding` at `H265Publisher`
+  construction. Canonical codec names that `ffmpeg_encoder_decoder::Decoder`
+  uses for `findDecoders()` lookup.
+- `pts` — derived by `ImageConverter` from the EncodedFrame timestamp.
+- `flags` — keyframe bit derived from `EncodedFrame::getFrameType()` (no
+  hand-rolled NAL inspection).
 - `data` — encoder bitstream bytes, Annex-B framed.
 
 ## QoS rationale

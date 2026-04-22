@@ -71,9 +71,6 @@ void CameraBase::initialize(std::string id, std::string label)
       device_,
       "h265",
       label,
-      label + "_optical_frame",
-      video_width_,
-      video_height_,
       profileEncoding(profile));
   }
 }
@@ -109,7 +106,10 @@ std::shared_ptr<dai::Pipeline> CameraBase::getPipeline()
     auto h265_xlink_out = pipeline->create<dai::node::XLinkOut>();
     h265_xlink_out->setStreamName("h265");
     h265_xlink_out->input.setBlocking(false);
-    encoder->bitstream.link(h265_xlink_out->input);
+    // Use VideoEncoder::out (EncodedFrame) rather than ::bitstream (ImgFrame)
+    // so dai::ros::ImageConverter::toRosFFMPEGPacket can do the conversion
+    // — same time-base calibration as the sibling sensor_msgs/Image path.
+    encoder->out.link(h265_xlink_out->input);
   }
 
   return pipeline;

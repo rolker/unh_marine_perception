@@ -49,7 +49,12 @@ cam->initialize("MXID...", "my_camera");
 ```
 
 ### `depthai_marine::H265Publisher`
-Publishes `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` on `<topic>/image_raw/ffmpeg` from the OAK's on-device `VideoEncoder` output. QoS is `rclcpp::SensorDataQoS()` to match the `ffmpeg_image_transport` subscriber convention. Instantiated automatically by `CameraBase::initialize()` when `h265_enable=true` — see [h265_transport.md](h265_transport.md).
+Publishes `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` on `<topic>/image_raw/ffmpeg`
+from `VideoEncoder::out` (`dai::EncodedFrame`), using `dai::ros::ImageConverter::toRosFFMPEGPacket`
+so timestamps share the same ROS-time base offset as the sibling `sensor_msgs/Image`.
+QoS is `rclcpp::SensorDataQoS()` to match the `ffmpeg_image_transport` subscriber
+convention. Instantiated automatically by `CameraBase::initialize()` when
+`h265_enable=true` — see [h265_transport.md](h265_transport.md).
 
 ### `depthai_marine::ImagePublisher`
 A helper class wrapping `depthai_bridge` to publish images from a DepthAI queue to a ROS 2 topic.

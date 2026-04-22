@@ -1,7 +1,9 @@
+#include <gtest/gtest.h>
+
 #include <stdexcept>
 #include <string>
 
-#include <gtest/gtest.h>
+#include "rclcpp/rclcpp.hpp"
 
 #include "depthai_marine/camera_base.hpp"
 
@@ -58,6 +60,34 @@ TEST(CameraParamsDefaults, MatchPlanValues)
   EXPECT_EQ(p.video_width, 1280);
   EXPECT_EQ(p.video_height, 720);
   EXPECT_EQ(p.enable_video, true);
+}
+
+TEST(PipelineAssembly, BaselineWithoutH265)
+{
+  // Pipeline graph assembly is a pure C++ operation; no device needed.
+  // Baseline case: default params, h265_enable=false — single preview
+  // XLinkOut branch.
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>("pipeline_assembly_baseline_test");
+  CameraBase base(node);
+  ASSERT_NO_THROW(base.getPipeline());
+  rclcpp::shutdown();
+}
+
+TEST(PipelineAssembly, WithH265Enabled)
+{
+  // Exercises the new VideoEncoder → XLinkOut("out") branch without
+  // connecting a device. Catches silent DepthAI API breakage (e.g. a
+  // renamed Profile enum or removed Encoder::out output) at CI time
+  // instead of at platform rollout.
+  rclcpp::init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>("pipeline_assembly_h265_test");
+  CameraBase base(node);
+  depthai_marine::CameraParams params;
+  params.h265_enable = true;
+  base.applyParams(params);
+  ASSERT_NO_THROW(base.getPipeline());
+  rclcpp::shutdown();
 }
 
 int main(int argc, char ** argv)
