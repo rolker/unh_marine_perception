@@ -12,23 +12,30 @@ savings at comparable visual quality.
 ```
 benchmarks/h265_transport/
 ├── README.md                # this file
+├── requirements.txt         # Python analysis deps (PyAV, scikit-image)
 ├── measure_bag_bw.py        # per-topic bandwidth from an MCAP bag
+├── compare.py               # JPEG vs H.265 bandwidth + SSIM/PSNR
 ├── launch/
 │   └── transcode_bag.launch.py   # play bag -> decode JPEG -> encode H.265 -> record
 ├── baselines/
 │   └── bizzy_images_2026-04-21.md   # JPEG baseline from the reference bags
-└── (compare.py)             # TODO: SSIM/PSNR comparison
-    (results/)               # TODO: matrix results
+└── (results/)               # TODO: matrix results
 ```
 
 ## Dependencies
 
-- Python 3 with the `mcap` package — use the workspace venv at
-  `/home/roland/project11/.venv/bin/python3`, which has it installed.
-- `ffmpeg_image_transport` — declared as an `exec_depend` in
+- **ROS runtime**: `ffmpeg_image_transport` — declared as an `exec_depend` in
   `depthai_marine/package.xml`. Install via `rosdep install` across the
   sensors layer, or directly:
   `sudo apt install ros-jazzy-ffmpeg-image-transport`.
+- **Python tools** (measure / compare): use the workspace venv at
+  `/home/roland/project11/.venv/bin/python3`. `mcap` is already there; install
+  the remaining analysis deps:
+  ```bash
+  /home/roland/project11/.venv/bin/pip install -r benchmarks/h265_transport/requirements.txt
+  ```
+  This adds `av` (PyAV, for H.265 decode from FFMPEGPacket bags) and
+  `scikit-image` (for SSIM/PSNR).
 
 ## Usage
 
@@ -67,6 +74,38 @@ ros2 launch benchmarks/h265_transport/launch/transcode_bag.launch.py \
 - The launch shuts down automatically when `ros2 bag play` exits.
 - libx265 is constrained to HW-mimic flags; see the node parameters in the
   launch file for the full `x265-params` string.
+
+### Compare a transcoded bag to its JPEG source
+
+```bash
+.venv/bin/python3 benchmarks/h265_transport/compare.py \
+  ~/data/logs/bizzy_images/bag_2026-04-21T13.58.31 \
+  /tmp/h265_smoke \
+  --jpeg-topic /bizzy/sensors/cameras/oak_forward/image_raw/compressed \
+  --ffmpeg-topic /h265_bench/encoded/ffmpeg
+```
+
+Reports per-camera bandwidth (real-time, derived from the source frame
+Header timestamps so it's accurate regardless of `play_rate` used during
+transcoding), bandwidth reduction ratio, and SSIM / PSNR vs the JPEG source.
+
+Flags:
+
+- `--max-frames N` — limit comparison to first N frames (fast sanity check).
+- `--markdown --label "<profile>"` — emit a single Markdown table row per
+  profile, for rolling up the 28-cell matrix.
+
+### Caveat on `bit_rate` as a control knob
+
+At `preset=ultrafast` with no `rc-lookahead` (which we're forced into because
+the HW mimic can't run lookahead anyway), libx265's ABR rate control is very
+loose on short clips. Setting `bitrate:=1500000` typically produces a bag at
+**~90 kbps**, not 1.5 Mbps — but at 500 kbps target, the bag drops to ~30 kbps
+(proportional). The `bit_rate` param is a working control, just not a literal
+target in this configuration. For the matrix, report *measured* bandwidth
+from the bag, not the target. The Myriad X hardware encoder's rate control
+may hit its target more precisely — this is another calibration item for
+when OAK hardware is available.
 
 ### Baseline
 
