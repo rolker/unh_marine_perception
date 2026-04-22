@@ -76,9 +76,9 @@ OAK cameras on bizzyboat use **33–42 Mbps** of aggregate JPEG bandwidth
 depending on scene; target for H.265 is roughly **2–4 Mbps** at equivalent
 quality.
 
-## OAK hardware encoder constraints
+## OAK hardware encoder constraints — and what we can enforce on libx265
 
-The Myriad X `VideoEncoder` is constrained to:
+The Myriad X `VideoEncoder` is:
 
 - H.265 **Main profile** only (no Main10, no Main-Intra).
 - No B-frames, single reference frame.
@@ -86,8 +86,39 @@ The Myriad X `VideoEncoder` is constrained to:
 - CBR or VBR (no CRF).
 - NV12 input, width multiple of 32 (1280x720 complies).
 
-Software `libx265` must be restricted to match, or the Phase 1 numbers won't
-predict Phase 2 behavior. See the issue body for the full flag set.
+What the `ffmpeg_image_transport` parameter parser actually lets us pass to
+libx265:
+
+| HW constraint | Enforced? | How |
+|---|---|---|
+| Main profile | Yes | `profile:main` |
+| No B-frames | Yes | `max_b_frames:0` (libav AVOption on AVCodecContext) |
+| Single reference | Yes | `refs:1` (libav AVOption on AVCodecContext) |
+| Fixed keyframe interval | Yes | top-level `gop_size` param |
+| No look-ahead | **No** | requires `x265-params:rc-lookahead=0` |
+| No scene-change keyframes | **No** | requires `x265-params:scenecut=0` |
+| No adaptive quantization | **No** | requires `x265-params:aq-mode=0` |
+| No cutree | **No** | requires `x265-params:cutree=0` |
+| Strict CBR / VBV tuning | **No** | requires `x265-params:rc=cbr:strict-cbr=1:vbv-*` |
+
+Why "No" for the bottom rows: `ffmpeg_image_transport`'s `encoder_av_options`
+parser is `key:value,key:value,...` and does not accept nested `:` in values.
+The `x265-params:...` string (whose value itself uses `:` as a separator) is
+rejected with "skipping bad AV option" at encoder init. This means libx265
+retains more rate-distortion optimization than the Myriad X hardware will
+have, so **software results will be optimistic** vs. the eventual on-device
+encoder — probably 10–20% smaller at matched visual quality (the 5–15% we
+already expected from RDO, compounded by the remaining lookahead/AQ/cutree
+differences). Calibrate by running one clip through an actual OAK when
+hardware is available.
+
+Also note: `pixel_format: yuv420p` (not `nv12`, which the Myriad X wants);
+libx265 software does not accept `nv12`. This is a colourspace-conversion
+step that the OAK HW pipeline skips.
+
+Sources:
+- [`VideoEncoderProperties.hpp`](https://github.com/luxonis/depthai-core/blob/main/include/depthai/properties/VideoEncoderProperties.hpp)
+- [Luxonis VideoEncoder docs](https://docs.luxonis.com/software/depthai-components/nodes/video_encoder/)
 
 Sources:
 - [`VideoEncoderProperties.hpp`](https://github.com/luxonis/depthai-core/blob/main/include/depthai/properties/VideoEncoderProperties.hpp)

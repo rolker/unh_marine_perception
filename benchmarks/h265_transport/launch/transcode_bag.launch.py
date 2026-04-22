@@ -8,9 +8,12 @@ Pipeline:
            --republish raw->ffmpeg--> /h265_bench/encoded/ffmpeg
            --record--> <output_bag>
 
-libx265 is constrained to what the OAK Myriad X hardware VideoEncoder can do
-(Main profile, no B-frames, single ref, no look-ahead, no adaptive quant,
-fixed-GOP CBR). See benchmarks/h265_transport/README.md for sources.
+libx265 is partially constrained to match the OAK Myriad X VideoEncoder:
+Main profile, no B-frames, single reference, fixed keyframe interval, CBR.
+Deeper x265-specific flags (cutree, aq-mode, scenecut, rc-lookahead, strict
+CBR / VBV) cannot be passed because ffmpeg_image_transport's
+`encoder_av_options` parser is `key:value,key:value` and doesn't accept the
+nested-colon `x265-params:...` string. See README.md for the gap analysis.
 
 Usage:
     ros2 launch benchmarks/h265_transport/launch/transcode_bag.launch.py \\
@@ -43,7 +46,6 @@ def generate_launch_description():
     output_bag = LaunchConfiguration("output_bag")
     bitrate = LaunchConfiguration("bitrate")
     gop_size = LaunchConfiguration("gop_size")
-    x265_level = LaunchConfiguration("x265_level")
     play_rate = LaunchConfiguration("play_rate")
     raw_topic = LaunchConfiguration("raw_topic")
     encoded_base = LaunchConfiguration("encoded_base")
@@ -73,11 +75,6 @@ def generate_launch_description():
             description="Keyframe interval in frames",
         ),
         DeclareLaunchArgument(
-            "x265_level",
-            default_value="4.1",
-            description="HEVC level-idc (4.1 fits 720p30; raise for larger)",
-        ),
-        DeclareLaunchArgument(
             "play_rate",
             default_value="1.0",
             description="ros2 bag play rate multiplier (1.0 = real time)",
@@ -94,28 +91,18 @@ def generate_launch_description():
         ),
     ]
 
-    x265_params = [
-        "bframes=0:ref=1:",
-        "rc-lookahead=0:cutree=0:lookahead-slices=0:b-adapt=0:",
-        "scenecut=0:keyint=", gop_size, ":min-keyint=", gop_size, ":no-open-gop=1:",
-        "aq-mode=0:rect=0:amp=0:",
-        "rc=cbr:strict-cbr=1:",
-        "bitrate=", bitrate, ":vbv-maxrate=", bitrate, ":vbv-bufsize=", bitrate, ":",
-        "level-idc=", x265_level,
-    ]
-
-    encoder_av_options = [
-        "preset:ultrafast,",
-        "tune:zerolatency,",
-        "profile:main,",
-        "x265-params:", *x265_params,
-    ]
+    encoder_av_options = (
+        "preset:ultrafast,tune:zerolatency,profile:main,"
+        "max_b_frames:0,refs:1"
+    )
 
     jpeg_decoder = Node(
         package="image_transport",
         executable="republish",
         name="jpeg_decoder",
-        arguments=["compressed", "raw"],
+        parameters=[
+            {"in_transport": "compressed", "out_transport": "raw"},
+        ],
         remappings=[
             ("in/compressed", [input_topic, "/compressed"]),
             ("out", raw_topic),
@@ -127,19 +114,19 @@ def generate_launch_description():
         package="image_transport",
         executable="republish",
         name="h265_encoder",
-        arguments=["raw", "ffmpeg"],
-        remappings=[
-            ("in", raw_topic),
-            ("out", encoded_base),
-        ],
         parameters=[
+            {"in_transport": "raw", "out_transport": "ffmpeg"},
             {
                 "out.ffmpeg.encoder": "libx265",
-                "out.ffmpeg.pixel_format": "nv12",
+                "out.ffmpeg.pixel_format": "yuv420p",
                 "out.ffmpeg.gop_size": gop_size,
                 "out.ffmpeg.bit_rate": bitrate,
                 "out.ffmpeg.encoder_av_options": encoder_av_options,
-            }
+            },
+        ],
+        remappings=[
+            ("in", raw_topic),
+            ("out/ffmpeg", [encoded_base, "/ffmpeg"]),
         ],
         output="screen",
     )
@@ -149,7 +136,6 @@ def generate_launch_description():
             "ros2", "bag", "play",
             bag,
             "--rate", play_rate,
-            "--topics", [input_topic, "/compressed"],
         ],
         output="screen",
     )
@@ -159,7 +145,7 @@ def generate_launch_description():
             "ros2", "bag", "record",
             "-s", "mcap",
             "-o", output_bag,
-            [encoded_base, "/ffmpeg"],
+            "--topics", [encoded_base, "/ffmpeg"],
         ],
         output="screen",
     )
