@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Compare a JPEG CompressedImage source bag to an H.265 FFMPEGPacket transcode
-bag for the same camera. Produces per-frame and aggregate bandwidth, encode
-latency, and SSIM/PSNR metrics.
+bag for the same camera. Produces aggregate bandwidth and SSIM/PSNR metrics.
 
 Pairs frames by PTS (message order): the transcoder emits one encoded packet
 per input frame, so the Nth FFMPEGPacket is compared against the Nth JPEG.

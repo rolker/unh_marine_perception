@@ -9,7 +9,8 @@ Pipeline:
            --record--> <output_bag>
 
 libx265 is partially constrained to match the OAK Myriad X VideoEncoder:
-Main profile, no B-frames, single reference, fixed keyframe interval, CBR.
+Main profile, no B-frames, single reference, fixed keyframe interval, and a
+target bit_rate (ABR — strict CBR/VBV can't be enforced here; see below).
 Deeper x265-specific flags (cutree, aq-mode, scenecut, rc-lookahead, strict
 CBR / VBV) cannot be passed because ffmpeg_image_transport's
 `encoder_av_options` parser is `key:value,key:value` and doesn't accept the
@@ -67,7 +68,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "bitrate",
             default_value="1500000",
-            description="Target CBR bitrate in bits/sec",
+            description="Target ABR bitrate in bits/sec (see README for why CBR isn't enforceable here)",
         ),
         DeclareLaunchArgument(
             "gop_size",

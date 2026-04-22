@@ -1,6 +1,6 @@
 # Dev-only dependencies for the H.265 transport benchmark (issue #2).
 # Not used at runtime by any ROS node — only by compare.py and the batch runner.
-# Install into the workspace venv:
-#   /home/roland/project11/.venv/bin/pip install -r requirements.txt
+# Install into the active workspace venv:
+#   python -m pip install -r requirements.txt
 av>=11.0          # PyAV — decode H.265 NALUs from FFMPEGPacket bags
 scikit-image>=0.22  # SSIM/PSNR quality metrics

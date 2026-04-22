@@ -50,7 +50,11 @@ def measure(mcap_path: str, topic_re: re.Pattern | None):
             if t_max is None or message.log_time > t_max:
                 t_max = message.log_time
 
-    duration_s = (t_max - t_min) / 1e9 if t_min is not None and t_max else 0.0
+    duration_s = (
+        (t_max - t_min) / 1e9
+        if t_min is not None and t_max is not None
+        else 0.0
+    )
     return bytes_by, count_by, type_by, duration_s
 
 

@@ -19,7 +19,7 @@ benchmarks/h265_transport/
 │   └── transcode_bag.launch.py   # play bag -> decode JPEG -> encode H.265 -> record
 ├── baselines/
 │   └── bizzy_images_2026-04-21.md   # JPEG baseline from the reference bags
-└── (results/)               # TODO: matrix results
+└── results/                 # committed benchmark result matrices
 ```
 
 ## Dependencies
@@ -28,11 +28,11 @@ benchmarks/h265_transport/
   `depthai_marine/package.xml`. Install via `rosdep install` across the
   sensors layer, or directly:
   `sudo apt install ros-jazzy-ffmpeg-image-transport`.
-- **Python tools** (measure / compare): use the workspace venv at
-  `/home/roland/project11/.venv/bin/python3`. `mcap` is already there; install
-  the remaining analysis deps:
+- **Python tools** (measure / compare): use the workspace venv (conventionally
+  at `.venv/` in the workspace root — see ADR-0009). `mcap` is already there;
+  with the venv active, install the remaining analysis deps:
   ```bash
-  /home/roland/project11/.venv/bin/pip install -r benchmarks/h265_transport/requirements.txt
+  python -m pip install -r benchmarks/h265_transport/requirements.txt
   ```
   This adds `av` (PyAV, for H.265 decode from FFMPEGPacket bags) and
   `scikit-image` (for SSIM/PSNR).
@@ -72,8 +72,9 @@ ros2 launch benchmarks/h265_transport/launch/transcode_bag.launch.py \
 - `input_topic` is the **base** name — the launch file appends `/compressed`
   to match what's in the bag.
 - The launch shuts down automatically when `ros2 bag play` exits.
-- libx265 is constrained to HW-mimic flags; see the node parameters in the
-  launch file for the full `x265-params` string.
+- libx265 is constrained to HW-mimic settings; see the launch file's
+  `encoder_av_options` together with the enforced `bit_rate` and `gop_size`
+  node parameters.
 
 ### Compare a transcoded bag to its JPEG source
 
@@ -93,7 +94,7 @@ Flags:
 
 - `--max-frames N` — limit comparison to first N frames (fast sanity check).
 - `--markdown --label "<profile>"` — emit a single Markdown table row per
-  profile, for rolling up the 28-cell matrix.
+  profile, for rolling up the benchmark matrix.
 
 ### Caveat on `bit_rate` as a control knob
 
@@ -154,10 +155,6 @@ hardware is available.
 Also note: `pixel_format: yuv420p` (not `nv12`, which the Myriad X wants);
 libx265 software does not accept `nv12`. This is a colourspace-conversion
 step that the OAK HW pipeline skips.
-
-Sources:
-- [`VideoEncoderProperties.hpp`](https://github.com/luxonis/depthai-core/blob/main/include/depthai/properties/VideoEncoderProperties.hpp)
-- [Luxonis VideoEncoder docs](https://docs.luxonis.com/software/depthai-components/nodes/video_encoder/)
 
 Sources:
 - [`VideoEncoderProperties.hpp`](https://github.com/luxonis/depthai-core/blob/main/include/depthai/properties/VideoEncoderProperties.hpp)

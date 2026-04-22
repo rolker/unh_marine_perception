@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Batch-run the H.265 transport benchmark matrix (rolker/unh_marine_perception#2).
 
-Iterates 4 cameras × 7 (bitrate, GOP) profiles = 28 cells. For each cell:
+Iterates 4 cameras × 12 (bitrate, GOP) profiles = 48 cells. For each cell:
   1. Invokes transcode_bag.launch.py to produce an H.265 bag.
   2. Invokes compare.py to compute real-time bandwidth + SSIM/PSNR vs JPEG.
   3. Appends one Markdown row to the running results file.
@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import os
 import shutil
 import subprocess
 import sys
@@ -49,7 +48,7 @@ PROFILES: tuple[tuple[int, int], ...] = (
 SCRIPT_DIR = Path(__file__).resolve().parent
 LAUNCH_FILE = SCRIPT_DIR / "launch" / "transcode_bag.launch.py"
 COMPARE_SCRIPT = SCRIPT_DIR / "compare.py"
-VENV_PY = Path("/home/roland/project11/.venv/bin/python3")
+VENV_PY = Path(sys.executable)
 
 HEADER = (
     "| Camera | Profile | Target kbps | GOP | JPEG Mbps | H.265 Mbps | Ratio | "
@@ -91,7 +90,7 @@ def run_compare(jpeg_bag: Path, ffmpeg_bag: Path, camera: str,
         cmd += ["--max-frames", str(max_frames)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        return f"| {label} | - | - | - | - | - | - | - | - | **FAILED: {result.stderr.strip()[:80]}** |"
+        return f"| {label} | - | - | - | - | - | - | - | **FAILED: {result.stderr.strip()[:80]}** |"
     return result.stdout.strip()
 
 
