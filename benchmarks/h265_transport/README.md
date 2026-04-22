@@ -13,18 +13,21 @@ savings at comparable visual quality.
 benchmarks/h265_transport/
 ├── README.md                # this file
 ├── measure_bag_bw.py        # per-topic bandwidth from an MCAP bag
+├── launch/
+│   └── transcode_bag.launch.py   # play bag -> decode JPEG -> encode H.265 -> record
 ├── baselines/
 │   └── bizzy_images_2026-04-21.md   # JPEG baseline from the reference bags
-└── (transcode_bag.launch.py)        # TODO
-    (compare.py)                     # TODO
-    (results/)                       # TODO
+└── (compare.py)             # TODO: SSIM/PSNR comparison
+    (results/)               # TODO: matrix results
 ```
 
 ## Dependencies
 
 - Python 3 with the `mcap` package — use the workspace venv at
   `/home/roland/project11/.venv/bin/python3`, which has it installed.
-- For transcoding (not yet added):
+- `ffmpeg_image_transport` — declared as an `exec_depend` in
+  `depthai_marine/package.xml`. Install via `rosdep install` across the
+  sensors layer, or directly:
   `sudo apt install ros-jazzy-ffmpeg-image-transport`.
 
 ## Usage
@@ -43,6 +46,27 @@ Flags:
 - `--topic-regex PATTERN` — only include topics matching the regex (default: all).
 - `--markdown` — Markdown table instead of aligned text.
 - `--min-bw-kbps N` — hide topics below N KB/s.
+
+### Transcode a bag
+
+Plays a bag, decodes one `CompressedImage` topic, re-encodes with H.265 via
+`ffmpeg_image_transport`, and records the resulting `FFMPEGPacket` stream to
+a new bag:
+
+```bash
+ros2 launch benchmarks/h265_transport/launch/transcode_bag.launch.py \
+  bag:=~/data/logs/bizzy_images/bag_2026-04-21T13.58.31 \
+  input_topic:=/bizzy/sensors/cameras/oak_forward/image_raw \
+  output_bag:=/tmp/h265_forward_b1500k_g15 \
+  bitrate:=1500000 \
+  gop_size:=15
+```
+
+- `input_topic` is the **base** name — the launch file appends `/compressed`
+  to match what's in the bag.
+- The launch shuts down automatically when `ros2 bag play` exits.
+- libx265 is constrained to HW-mimic flags; see the node parameters in the
+  launch file for the full `x265-params` string.
 
 ### Baseline
 
