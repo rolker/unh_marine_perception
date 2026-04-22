@@ -56,6 +56,21 @@ platform side.
 
    Platform rollout (#78) enables alongside first, then flips
    `enable_video=false` once H.265 is proven on the operator side.
+5. **QoS profile**: `H265Publisher` uses `rclcpp::SensorDataQoS()`
+   (BEST_EFFORT, VOLATILE, depth 5). Matches the `ffmpeg_image_transport`
+   subscriber convention for auto-discovery on the operator side. Accept
+   asymmetry with the sibling `image_raw` RELIABLE QoS (historical via
+   `BridgePublisher`'s int-queue-size overload) — dropping stale H.265
+   frames is strictly better than publisher backpressure on a lossy LTE /
+   `udp_bridge` link. Documented at the `create_publisher` call site and in
+   `docs/h265_transport.md`.
+6. **Public dependency export**: `h265_publisher.hpp` is included from the
+   public `camera_base.hpp` header (matching the `image_publisher.hpp`
+   pattern), so `ffmpeg_image_transport_msgs` becomes a transitive public
+   dep. `depthai_marine/CMakeLists.txt` adds it to
+   `ament_export_dependencies(...)` alongside the existing
+   `depthai depthai_bridge rclcpp sensor_msgs`. Without this,
+   `sea_surface_segmentation`'s build would fail to find the msg headers.
 
 ## Approach
 
@@ -84,6 +99,9 @@ platform side.
    becomes one FFMPEGPacket:
    - `data` = encoder bitstream bytes (NAL units as emitted by the encoder)
    - `encoding` = `hevc` for H.265 profiles, `h264` for H.264 profiles
+     (implementation check: verify these values against the installed
+     `ffmpeg_image_transport` 3.x decoder's expected strings to guarantee
+     auto-discovery on the operator side)
    - `pts` / `dts` = `duration_cast<microseconds>(frame->getTimestamp().time_since_epoch()).count()`
      — derived from `getTimestamp()`, not `getSequenceNum()`, so it stays
      consistent with `header.stamp`
@@ -91,15 +109,23 @@ platform side.
    - `header.stamp` = ROS-converted device timestamp (matches the sibling
      `sensor_msgs::Image`)
    - `flags` = keyframe bit from `dai::ImgFrame` metadata
+   Publisher is created via `rclcpp::Node::create_publisher<FFMPEGPacket>`
+   with `rclcpp::SensorDataQoS()` (design decision 5); `BridgePublisher`
+   is not used because FFMPEGPacket doesn't share `sensor_msgs/Image`'s
+   `ImageConverter` plumbing.
    Instantiated in `CameraBase::initialize()` alongside `camera_publisher_`
    when `h265_enable_` is true.
 4. **Wire params through callers** — in `wide_stereo.cpp` and
    `sea_surface_segmentation.cpp`, declare the six new ROS params and
    forward to the camera subclass constructors via the existing setter
    pattern (`enableVideo`, `setFps`, etc.).
-5. **CMake / package.xml** — add `ffmpeg_image_transport_msgs` dependency;
-   link against it in `depthai_marine_lib`. `ffmpeg_image_transport` was
-   already declared as `exec_depend` from PR #3.
+5. **CMake / package.xml** — add `ffmpeg_image_transport_msgs` dependency
+   in `package.xml`; `find_package(ffmpeg_image_transport_msgs)` and link
+   into `depthai_marine_lib` in `CMakeLists.txt`; add to
+   `ament_export_dependencies(...)` alongside the existing four so the
+   transitive dep flows to downstream consumers like
+   `sea_surface_segmentation` (design decision 6). `ffmpeg_image_transport`
+   itself was already declared as `exec_depend` from PR #3.
 6. **Non-hardware tests** — add a GTest target that:
    - Parses each supported `h265_profile` string into the correct
      `dai::VideoEncoderProperties::Profile` enum.
@@ -133,7 +159,7 @@ platform side.
 | `depthai_marine/src/wide_stereo.cpp` | Declare 6 new ROS params and forward to `MainCamera` / `SecondaryCamera`. |
 | `sea_surface_segmentation/src/sea_surface_segmentation.cpp` | Declare 6 new ROS params and forward to `SegmentorCamera` constructor. |
 | `depthai_marine/package.xml` | Add `<depend>ffmpeg_image_transport_msgs</depend>`. |
-| `depthai_marine/CMakeLists.txt` | `find_package(ffmpeg_image_transport_msgs)`, link into `depthai_marine_lib`, add test target. |
+| `depthai_marine/CMakeLists.txt` | `find_package(ffmpeg_image_transport_msgs)`, link into `depthai_marine_lib`, add to `ament_export_dependencies`, add test target. |
 | `depthai_marine/test/test_h265_params.cpp` | New: GTest covering profile parsing, bounds, and pipeline-graph construction. |
 | `depthai_marine/docs/h265_transport.md` | New: topic contract, param reference, launch recipes. |
 | `depthai_marine/docs/API.md` | Link to new h265_transport doc; add the new topic. |
