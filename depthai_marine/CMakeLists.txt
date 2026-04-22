@@ -13,12 +13,14 @@ find_package(camera_info_manager REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(depthai CONFIG REQUIRED)
 find_package(depthai_bridge REQUIRED)
+find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(lifecycle_msgs)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
 add_library(depthai_marine_lib
   src/camera_base.cpp
+  src/h265_publisher.cpp
   src/image_publisher.cpp
 )
 
@@ -31,6 +33,7 @@ target_link_libraries(depthai_marine_lib
   depthai::core
   depthai::opencv
   depthai_bridge::depthai_bridge
+  ${ffmpeg_image_transport_msgs_TARGETS}
   rclcpp::rclcpp
   ${sensor_msgs_TARGETS}
 )
@@ -112,8 +115,17 @@ ament_export_include_directories(include)
 ament_export_dependencies(
   depthai
   depthai_bridge
+  ffmpeg_image_transport_msgs
   rclcpp
   sensor_msgs
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_h265_params test/test_h265_params.cpp)
+  target_link_libraries(test_h265_params
+    depthai_marine_lib
+  )
+endif()
 
 ament_package()

@@ -13,9 +13,22 @@ Base class for creating DepthAI camera nodes in the UNH Marine Autonomy framewor
 |---|---|
 | `CameraBase(std::shared_ptr<rclcpp::Node> node)` | Constructor. Requires a ROS 2 node handle. |
 | `void initialize(std::string id, std::string label)` | Initializes the connection to the OAK device with the given MXID (`id`) and assigns a logger label. |
-| `void setPreviewSize(int width, int height)` | Sets the resolution of the camera preview stream (default 1280x720). |
-| `void enableVideo(bool enable)` | Enables or disables the video stream (default true). |
+| `void applyParams(const CameraParams & params)` | Bulk-applies all per-camera settings before `initialize`. See `CameraParams`. |
+| `void setPreviewSize(int width, int height)` | Sets the resolution of the camera preview output (default 1280×720). |
+| `void setVideoSize(int width, int height)` | Sets the ISP output resolution that feeds both `video` (H.265 encoder input) and `preview` (default 1280×720). |
+| `void enableVideo(bool enable)` | Enables or disables the raw `image_raw` host publication (default true). |
+| `void enableH265(bool enable)` | Opt in to the on-device H.265/H.264 encoder path. Publishes `FFMPEGPacket` on `<camera>/image_raw/ffmpeg` — see [h265_transport.md](h265_transport.md). |
+| `void setH265BitrateKbps(int kbps)` / `setH265KeyframeFrequencyFrames(int)` / `setH265Profile(const std::string &)` | Encoder tuning knobs. |
 | `virtual std::shared_ptr<dai::Pipeline> getPipeline()` | Virtual method to construct the DepthAI pipeline. Override this to add more nodes (e.g., neural networks, stereo depth). |
+
+#### Static Methods
+| Method | Description |
+|---|---|
+| `static dai::VideoEncoderProperties::Profile parseProfile(const std::string &)` | Parses `"H265_MAIN"` / `"H264_MAIN"` / `"H264_BASELINE"` / `"H264_HIGH"`. Throws `std::invalid_argument` otherwise. |
+| `static std::string profileEncoding(dai::VideoEncoderProperties::Profile)` | Returns the `FFMPEGPacket.encoding` string: `"hevc"` for H.265 profiles, `"h264"` for H.264 profiles. |
+
+### `depthai_marine::CameraParams`
+Bundled per-camera configuration populated from ROS params and passed to `CameraBase::applyParams`. Covers preview/video resolution, FPS, and the H.265 encoder knobs. See [h265_transport.md](h265_transport.md) for the full field reference.
 
 #### Usage Example
 ```cpp
@@ -34,6 +47,9 @@ public:
 auto cam = std::make_shared<MyCamera>(node);
 cam->initialize("MXID...", "my_camera");
 ```
+
+### `depthai_marine::H265Publisher`
+Publishes `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` on `<topic>/image_raw/ffmpeg` from the OAK's on-device `VideoEncoder` output. QoS is `rclcpp::SensorDataQoS()` to match the `ffmpeg_image_transport` subscriber convention. Instantiated automatically by `CameraBase::initialize()` when `h265_enable=true` — see [h265_transport.md](h265_transport.md).
 
 ### `depthai_marine::ImagePublisher`
 A helper class wrapping `depthai_bridge` to publish images from a DepthAI queue to a ROS 2 topic.
