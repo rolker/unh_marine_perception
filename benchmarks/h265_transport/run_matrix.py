@@ -25,7 +25,12 @@ from pathlib import Path
 
 CAMERAS = ("oak_forward", "oak_port", "oak_aft", "oak_starboard")
 
-# (bitrate_kbps, gop_size_frames)
+# (bitrate_kbps, gop_size_frames). GOP 30 dominates GOP 15 at the same target
+# (identical bandwidth, marginally better SSIM) per the first matrix run, so
+# the extended high-bitrate cells only sweep bitrate at GOP 30. The high end
+# targets ~1 Mbps actual output per camera (matching today's throttled-JPEG
+# budget of ~1 Mbps/camera at 0.5 Hz) so we can compare quality at equivalent
+# bandwidth but 10× frame rate.
 PROFILES: tuple[tuple[int, int], ...] = (
     (500, 5),
     (500, 15),
@@ -34,6 +39,11 @@ PROFILES: tuple[tuple[int, int], ...] = (
     (1500, 30),
     (2500, 30),
     (4000, 30),
+    (6000, 30),
+    (8000, 30),
+    (12000, 30),
+    (17000, 30),
+    (20000, 30),
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent

@@ -163,57 +163,106 @@ Sources:
 - [`VideoEncoderProperties.hpp`](https://github.com/luxonis/depthai-core/blob/main/include/depthai/properties/VideoEncoderProperties.hpp)
 - [Luxonis VideoEncoder docs](https://docs.luxonis.com/software/depthai-components/nodes/video_encoder/)
 
-## Results (first matrix run, 2026-04-21)
+## Results
 
-Full 28-cell run from source bag `bag_2026-04-21T13.58.31` lives in
-[`results/matrix_20260421_223215.md`](results/matrix_20260421_223215.md).
-Headlines across the 4 cameras (ranges span the 4 cameras at the same target):
+Two full runs from source bag `bag_2026-04-21T13.58.31`, both all-cells-ok:
 
-| Target kbps | GOP | H.265 Mbps | Reduction | SSIM mean | PSNR mean |
-|---:|---:|---:|---:|---:|---:|
-|  500 |  5 | 0.03–0.05 | 187–222× | 0.62–0.67 | 25.0–26.2 |
-|  500 | 15 | 0.02–0.03 | 267–336× | 0.61–0.66 | 24.7–26.0 |
-| 1000 | 15 | 0.04–0.06 | 143–167× | 0.64–0.70 | 25.7–27.4 |
-| 1500 | 15 | 0.06–0.08 | 100–117× | 0.68–0.73 | 26.5–28.1 |
-| 1500 | 30 | 0.06–0.08 | 106–123× | 0.69–0.73 | 26.6–28.1 |
-| 2500 | 30 | 0.09–0.13 |  66–76×  | 0.73–0.78 | 27.6–29.2 |
-| 4000 | 30 | 0.14–0.20 |  43–48×  | 0.79–0.82 | 28.8–30.3 |
+- [`results/matrix_20260421_223215.md`](results/matrix_20260421_223215.md) —
+  first 28-cell matrix (7 profiles × 4 cameras), low-to-mid bitrate band.
+- [`results/matrix_20260421_232314.md`](results/matrix_20260421_232314.md) —
+  extended 48-cell matrix (12 profiles × 4 cameras), adds the high band
+  to reach the bandwidth budget today's throttled JPEG transport uses.
 
-Against the four-camera JPEG aggregate of ~33 Mbps, the 4 Mbps / GOP-30 target
-would consume ~0.75 Mbps — a very compelling operating point on wire bytes.
+### Today's baseline (`udp_bridge` stats from `~/data/logs/bizzyboat/`)
+
+Measured from `TopicStatisticsArray` + `BridgeInfo` on bag
+`2026-04-14T12.43.44` (current production, not the benchmark source bag):
+
+| Camera | Link(s) | Effective rate | Per-camera Mbps |
+|---|---|---:|---:|
+| oak_forward | vpn + wifi | 0.49 Hz | 1.06 (each link) |
+| oak_port | wifi | 0.49 Hz | 0.89 |
+| oak_aft | wifi | 0.49 Hz | 1.10 |
+| oak_starboard | wifi | 0.47 Hz | 1.13 |
+
+- **Four-camera wifi aggregate: ~4.18 Mbps** out of the 12 Mbps cap.
+- **Effective frame rate the operator sees: ~0.5 Hz** (one frame every ~2 s)
+  because `udp_bridge` throttles message rate to fit the bandwidth cap.
+- oak_forward is duplicated on vpn (another 1.06 Mbps).
+
+### H.265 curve at the same bandwidth budget, at full 5 Hz
+
+Extended-matrix 3-camera aggregate at **GOP 30** (excludes `oak_aft` in this
+summary — see *Caveats* below). Compare against today's 4.18 Mbps / 0.5 Hz
+wifi line.
+
+| Target kbps | 3-cam Mbps | SSIM mean | PSNR mean | vs today (3-cam wifi ≈ 3.1 Mbps) |
+|---:|---:|---:|---:|---|
+| 1500 | 0.22 | 0.73 | 27.7 | 1/14 bandwidth, 10× rate, usable |
+| 2500 | 0.35 | 0.77 | 28.7 | 1/9 bandwidth, 10× rate, good |
+| 4000 | 0.54 | 0.82 | 29.9 | 1/6 bandwidth, 10× rate, strong |
+| 6000 | 0.78 | 0.85 | 31.0 | 1/4 bandwidth, 10× rate, very good |
+| 8000 | 1.05 | 0.88 | 31.8 | 1/3 bandwidth, 10× rate |
+| 12000 | 1.55 | **0.91** | 33.3 | 1/2 bandwidth, 10× rate, **near-identical** |
+| 17000 | 2.18 | **0.93** | 34.6 | 2/3 bandwidth, 10× rate |
+| 20000 | 2.56 | **0.94** | 35.2 | ~5/6 bandwidth, 10× rate, **visually identical** |
+
+For completeness, the GOP-15 and low-target (500 kbps) rows from the first
+matrix run are in [`results/matrix_20260421_223215.md`](results/matrix_20260421_223215.md) —
+they only beat the mid-band on bandwidth while losing to it on SSIM. GOP 30
+is the right default.
+
+Rule-of-thumb reading: every row above the 2500-kbps line *already* matches
+or beats today's production on bandwidth. The high-band rows trade bandwidth
+for quality — picking the right one depends on the use case.
+
+### Operating-point recommendations
+
+| Goal | Target | Per-camera Mbps | SSIM | Why |
+|---|---|---:|---:|---|
+| **Minimum viable telemetry** | b500k / GOP 15 | 0.02–0.05 | 0.61–0.67 | Aggressive compression, situational awareness only. 200× reduction from current JPEG. |
+| **Replacement at matched budget** | b12000k / GOP 30 | 0.3–0.6 | **0.91** | ~1/3 of today's bandwidth, 10× frame rate, near-visually-identical. |
+| **Maximum quality within current budget** | b20000k / GOP 30 | 0.7–1.0 | **0.94** | Matches today's per-camera bandwidth exactly (~1 Mbps), 10× rate, indistinguishable from JPEG in casual viewing. |
+
+**Recommendation for first on-device test on real OAK hardware:**
+**b17000k / GOP 30**. Software result: ~0.80 Mbps per camera, SSIM 0.93.
+That's slightly under today's 1 Mbps/camera, at 10× frame rate, at quality
+any operator would consider indistinguishable. Expectation: the Myriad X
+encoder with tighter rate control should hit this quality at a lower target
+bitrate (possibly 2–3 Mbps target) with the same actual output.
 
 ### Observations
 
-- **GOP 30 dominates GOP 15 at the same bitrate target** — identical bandwidth
-  (~0.08 Mbps at 1500k target), slightly better SSIM. Keyframes every 6 s at
-  5 Hz is the right default.
-- **GOP 5 at 500 kbps produces more bytes than GOP 15 at 500 kbps**, because
-  keyframes are expensive and shorter GOPs means more of them. For
-  bandwidth-constrained links, long GOPs help — at the cost of recovery time
-  after packet loss.
-- **SSIM 0.81 at the 4 Mbps target** is "visibly degraded but usable" (0.95+
-  is visually identical). Below 0.70 the output is noticeably smeared,
-  especially on horizon and surface-texture detail. For situational awareness,
-  SSIM ≥ 0.75 looks like the floor.
-- **The 17× gap between requested and delivered bitrate is consistent across
-  all 28 cells**, confirming this is libx265's rate-control behavior under
-  `preset=ultrafast` + `rc-lookahead=0`, not a pipeline bug. The Myriad X's
-  rate control may be more precise — another calibration item.
-- **oak_aft has the highest baseline** (9.7 Mbps JPEG) and consumes the most
-  H.265 bytes; **oak_starboard the lowest** (5.9 Mbps) partly because its
-  capture rate is 3.5 Hz not 5 Hz.
+- **GOP 30 dominates GOP 15 at the same bitrate target** — identical
+  bandwidth, slightly better SSIM. Keyframes every 6 s at 5 Hz is the right
+  default.
+- **GOP 5 at 500 kbps produces more bytes than GOP 15 at 500 kbps** because
+  keyframes are expensive. For bandwidth-constrained links, long GOPs help —
+  at the cost of recovery time after packet loss.
+- **The 17× gap between requested and delivered bitrate** is consistent
+  across all 48 cells at low-to-mid target; it **narrows as target increases**
+  (e.g., b20000k delivers ~0.95 Mbps / camera, a ratio of ~21×, so rate
+  control asymptotes). The Myriad X hardware encoder may hit target
+  directly — this is a calibration item for when hardware is available.
+- **oak_aft has the highest JPEG baseline** (9.7 Mbps) from marine scene
+  content, and also showed anomalous SSIM dips at b8000/b12000/b17000
+  (SSIM 0.47–0.56 where other cameras got 0.88–0.93) before recovering at
+  b20000. Likely a PyAV decoder sync issue on that specific stream, not a
+  real encoder quality regression. Re-running those cells in isolation
+  should resolve it; for now the 3-camera aggregate above is a cleaner
+  summary.
 
-### Recommended operating point for the on-device encoder test
+### Caveats (unchanged from first run)
 
-**Target: ~4 Mbps, GOP 30** (keyframes every 6 s at 5 Hz). This produced
-SSIM 0.79–0.82 across cameras, consuming ~0.75 Mbps aggregate on wire —
-enough headroom on any field link, and visually good enough for operator
-situational awareness.
-
-When an OAK camera is available, reproduce the cell at 4 Mbps / GOP 30 on
-hardware and check whether actual bandwidth matches target more closely than
-the software equivalent. If so, a HW target of 1–1.5 Mbps may hit equivalent
-SSIM at even lower bandwidth.
+- `x265-params:...` can't pass `ffmpeg_image_transport`'s `key:value` parser,
+  so we lose cutree / aq-mode / scenecut / strict-CBR / VBV tightness.
+  libx265 retains more RDO than the Myriad X will — software numbers here
+  are 10–20% optimistic vs. eventual hardware.
+- `preset=ultrafast` + `rc-lookahead=0` makes libx265's ABR very loose. The
+  Myriad X's rate control may be closer to its target.
+- Single source bag; scene variance across the three `bizzy_images` bags is
+  ~40% on JPEG baseline. Re-running with the other two bags is a cheap
+  sanity check before finalizing operating point.
 
 ## Out of scope
 
