@@ -187,6 +187,15 @@ Measured from `TopicStatisticsArray` + `BridgeInfo` on bag
   because `udp_bridge` throttles message rate to fit the bandwidth cap.
 - oak_forward is duplicated on vpn (another 1.06 Mbps).
 
+See [`baselines/bizzy_production_udp_bridge_2026-04-14.md`](baselines/bizzy_production_udp_bridge_2026-04-14.md)
+for the full non-camera telemetry breakdown, network-topology notes
+(LTE↔Starlink failover is transparent to `udp_bridge`), and a cost-aware
+operating-point table across the full H.265 target range (bitrate → %
+vpn cap → GB / 6h mission). The production default
+(**`b4000k / GOP 30`** — 4 cameras at ~1.4 Mbps total, SSIM 0.82) is the
+same value proposed as the default `h265_bitrate_kbps` in follow-up
+issue [#4](https://github.com/rolker/unh_marine_perception/issues/4).
+
 ### H.265 curve at the same bandwidth budget, at full 5 Hz
 
 Extended-matrix 3-camera aggregate at **GOP 30** (excludes `oak_aft` in this
