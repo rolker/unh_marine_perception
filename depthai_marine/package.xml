@@ -15,6 +15,10 @@
   <depend>depthai_bridge</depend>
   <depend>rclcpp</depend>
 
+  <!-- Used by benchmarks/h265_transport/ launch files; will become a runtime
+       dep here once on-device VideoEncoder integration lands. -->
+  <exec_depend>ffmpeg_image_transport</exec_depend>
+  <exec_depend>image_transport</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
