@@ -67,31 +67,59 @@ TEST(PipelineAssembly, BaselineWithoutH265)
   // Pipeline graph assembly is a pure C++ operation; no device needed.
   // Baseline case: default params, h265_enable=false — single preview
   // XLinkOut branch.
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("pipeline_assembly_baseline_test");
   CameraBase base(node);
-  ASSERT_NO_THROW(base.getPipeline());
-  rclcpp::shutdown();
+  EXPECT_NO_THROW(base.getPipeline());
 }
 
 TEST(PipelineAssembly, WithH265Enabled)
 {
-  // Exercises the new VideoEncoder → XLinkOut("out") branch without
+  // Exercises the new VideoEncoder::out → XLinkOut("h265") branch without
   // connecting a device. Catches silent DepthAI API breakage (e.g. a
   // renamed Profile enum or removed Encoder::out output) at CI time
   // instead of at platform rollout.
-  rclcpp::init(0, nullptr);
   auto node = std::make_shared<rclcpp::Node>("pipeline_assembly_h265_test");
   CameraBase base(node);
   depthai_marine::CameraParams params;
   params.h265_enable = true;
   base.applyParams(params);
-  ASSERT_NO_THROW(base.getPipeline());
-  rclcpp::shutdown();
+  EXPECT_NO_THROW(base.getPipeline());
+}
+
+TEST(CameraBaseValidation, SetVideoSizeRejectsNonPositive)
+{
+  auto node = std::make_shared<rclcpp::Node>("validate_video_size_test");
+  CameraBase base(node);
+  EXPECT_THROW(base.setVideoSize(0, 720), std::invalid_argument);
+  EXPECT_THROW(base.setVideoSize(1280, 0), std::invalid_argument);
+  EXPECT_THROW(base.setVideoSize(-1, 720), std::invalid_argument);
+  EXPECT_THROW(base.setVideoSize(1280, -1), std::invalid_argument);
+  EXPECT_NO_THROW(base.setVideoSize(1280, 720));
+}
+
+TEST(CameraBaseValidation, SetH265BitrateKbpsRejectsNonPositive)
+{
+  auto node = std::make_shared<rclcpp::Node>("validate_bitrate_test");
+  CameraBase base(node);
+  EXPECT_THROW(base.setH265BitrateKbps(0), std::invalid_argument);
+  EXPECT_THROW(base.setH265BitrateKbps(-1), std::invalid_argument);
+  EXPECT_NO_THROW(base.setH265BitrateKbps(4000));
+}
+
+TEST(CameraBaseValidation, SetH265KeyframeFrequencyFramesRejectsNonPositive)
+{
+  auto node = std::make_shared<rclcpp::Node>("validate_keyframe_test");
+  CameraBase base(node);
+  EXPECT_THROW(base.setH265KeyframeFrequencyFrames(0), std::invalid_argument);
+  EXPECT_THROW(base.setH265KeyframeFrequencyFrames(-1), std::invalid_argument);
+  EXPECT_NO_THROW(base.setH265KeyframeFrequencyFrames(30));
 }
 
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+  rclcpp::init(argc, argv);
+  const int result = RUN_ALL_TESTS();
+  rclcpp::shutdown();
+  return result;
 }

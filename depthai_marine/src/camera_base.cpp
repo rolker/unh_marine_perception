@@ -135,6 +135,9 @@ void CameraBase::setPreviewSize(int width, int height)
 
 void CameraBase::setVideoSize(int width, int height)
 {
+  if (width <= 0 || height <= 0) {
+    throw std::invalid_argument("Video size must have positive width and height");
+  }
   video_width_ = width;
   video_height_ = height;
 }
@@ -156,11 +159,17 @@ void CameraBase::enableH265(bool enable)
 
 void CameraBase::setH265BitrateKbps(int bitrate_kbps)
 {
+  if (bitrate_kbps <= 0) {
+    throw std::invalid_argument("H.265 bitrate must be > 0 kbps");
+  }
   h265_bitrate_kbps_ = bitrate_kbps;
 }
 
 void CameraBase::setH265KeyframeFrequencyFrames(int frames)
 {
+  if (frames <= 0) {
+    throw std::invalid_argument("H.265 keyframe frequency must be > 0 frames");
+  }
   h265_keyframe_frequency_frames_ = frames;
 }
 
