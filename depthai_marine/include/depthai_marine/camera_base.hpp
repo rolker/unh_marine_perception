@@ -5,7 +5,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "depthai/depthai.hpp"
-#include "depthai_marine/h265_publisher.hpp"
+#include "depthai_marine/ffmpeg_publisher.hpp"
 #include "depthai_marine/image_publisher.hpp"
 
 namespace depthai_marine {
@@ -65,7 +65,7 @@ protected:
   std::shared_ptr<dai::Device> device_;
   std::shared_ptr<dai::node::Camera> camera_;
   std::shared_ptr<ImagePublisher> camera_publisher_;
-  std::shared_ptr<H265Publisher> h265_publisher_;
+  std::shared_ptr<FFMPEGPublisher> ffmpeg_publisher_;
 
   int preview_width_ = 1280;
   int preview_height_ = 720;

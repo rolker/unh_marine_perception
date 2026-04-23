@@ -26,11 +26,11 @@ timestamps for each physical frame.
 Field mapping on each `FFMPEGPacket` (filled in by `toRosFFMPEGPacket`):
 
 - `header.stamp` — ROS time, base-offset from `EncodedFrame::getTimestamp()`.
-- `header.frame_id` — the camera label passed to `H265Publisher` (same as the
+- `header.frame_id` — the camera label passed to `FFMPEGPublisher` (same as the
   sibling `sensor_msgs/Image`'s `frame_id`).
 - `width` / `height` — from `EncodedFrame::getWidth()` / `getHeight()`.
 - `encoding` — `"hevc"` for H.265 profiles, `"h264"` for H.264 profiles;
-  configured via `ImageConverter::setFFMPEGEncoding` at `H265Publisher`
+  configured via `ImageConverter::setFFMPEGEncoding` at `FFMPEGPublisher`
   construction. Canonical codec names that `ffmpeg_encoder_decoder::Decoder`
   uses for `findDecoders()` lookup.
 - `pts` — derived by `ImageConverter` from the EncodedFrame timestamp.
@@ -53,7 +53,7 @@ separate cleanup.
 
 | Param | Type | Default | Purpose |
 |---|---|---|---|
-| `h265_enable` | bool | `false` | Opt-in. When `true`, the VideoEncoder branch is added to the pipeline and `H265Publisher` publishes on `<camera>/image_raw/ffmpeg`. |
+| `h265_enable` | bool | `false` | Opt-in. When `true`, the VideoEncoder branch is added to the pipeline and `FFMPEGPublisher` publishes on `<camera>/image_raw/ffmpeg`. |
 | `h265_bitrate_kbps` | int | `4000` | CBR target bitrate. Feeds `VideoEncoder::setBitrateKbps`. Calibrate per platform; starting point is the PR #3 recommendation. |
 | `h265_keyframe_frequency_frames` | int | `30` | Keyframe every Nth frame. At 5 FPS that's every 6 seconds. |
 | `h265_profile` | string | `"H265_MAIN"` | `H265_MAIN`, `H264_MAIN`, `H264_BASELINE`, or `H264_HIGH`. Passed through `CameraBase::parseProfile`. |

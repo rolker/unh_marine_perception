@@ -1,8 +1,8 @@
-#include "depthai_marine/h265_publisher.hpp"
+#include "depthai_marine/ffmpeg_publisher.hpp"
 
 namespace depthai_marine {
 
-H265Publisher::H265Publisher(
+FFMPEGPublisher::FFMPEGPublisher(
   std::shared_ptr<rclcpp::Node> node,
   std::shared_ptr<dai::Device> device,
   const std::string & queue_name,
@@ -28,12 +28,16 @@ H265Publisher::H265Publisher(
     [this](std::shared_ptr<dai::ADatatype> data) {
       auto frame = std::dynamic_pointer_cast<dai::EncodedFrame>(data);
       if (frame) {
-        publisher_->publish(converter_->toRosFFMPEGPacket(frame));
+        // Move-based publish: avoids copying the encoded packet (can be
+        // hundreds of kB for video) before DDS serialization.
+        auto packet = std::make_unique<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(
+          converter_->toRosFFMPEGPacket(frame));
+        publisher_->publish(std::move(packet));
       }
     });
 }
 
-H265Publisher::~H265Publisher()
+FFMPEGPublisher::~FFMPEGPublisher()
 {
   if (queue_ && callback_id_ >= 0) {
     queue_->removeCallback(callback_id_);

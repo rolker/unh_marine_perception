@@ -20,7 +20,7 @@ find_package(sensor_msgs REQUIRED)
 
 add_library(depthai_marine_lib
   src/camera_base.cpp
-  src/h265_publisher.cpp
+  src/ffmpeg_publisher.cpp
   src/image_publisher.cpp
 )
 

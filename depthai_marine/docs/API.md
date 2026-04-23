@@ -48,9 +48,11 @@ auto cam = std::make_shared<MyCamera>(node);
 cam->initialize("MXID...", "my_camera");
 ```
 
-### `depthai_marine::H265Publisher`
-Publishes `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` on `<topic>/image_raw/ffmpeg`
-from `VideoEncoder::out` (`dai::EncodedFrame`), using `dai::ros::ImageConverter::toRosFFMPEGPacket`
+### `depthai_marine::FFMPEGPublisher`
+Codec-agnostic publisher for `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` on
+`<topic>/image_raw/ffmpeg`. Carries H.265 or H.264 depending on the profile
+configured on the DepthAI `VideoEncoder`. Reads `dai::EncodedFrame` from
+`VideoEncoder::out` and converts via `dai::ros::ImageConverter::toRosFFMPEGPacket`
 so timestamps share the same ROS-time base offset as the sibling `sensor_msgs/Image`.
 QoS is `rclcpp::SensorDataQoS()` to match the `ffmpeg_image_transport` subscriber
 convention. Instantiated automatically by `CameraBase::initialize()` when

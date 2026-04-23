@@ -17,7 +17,9 @@ dai::VideoEncoderProperties::Profile CameraBase::parseProfile(const std::string 
   if (name == "H264_MAIN") return dai::VideoEncoderProperties::Profile::H264_MAIN;
   if (name == "H264_BASELINE") return dai::VideoEncoderProperties::Profile::H264_BASELINE;
   if (name == "H264_HIGH") return dai::VideoEncoderProperties::Profile::H264_HIGH;
-  throw std::invalid_argument("Unknown H.265/H.264 profile: " + name);
+  throw std::invalid_argument(
+    "Unknown H.265/H.264 profile: " + name +
+    ". Supported values: H265_MAIN, H264_MAIN, H264_BASELINE, H264_HIGH");
 }
 
 std::string CameraBase::profileEncoding(dai::VideoEncoderProperties::Profile profile)
@@ -66,7 +68,7 @@ void CameraBase::initialize(std::string id, std::string label)
 
   if (h265_enable_) {
     const auto profile = parseProfile(h265_profile_);
-    h265_publisher_ = std::make_shared<H265Publisher>(
+    ffmpeg_publisher_ = std::make_shared<FFMPEGPublisher>(
       node_,
       device_,
       "h265",
