@@ -121,7 +121,7 @@ Node(
 
 ## Hardware considerations
 
-The `camera_->video` → `VideoEncoder` → `XLinkOut("h265")` branch runs in
+The `camera_->video` → `VideoEncoder` → `XLinkOut("ffmpeg")` branch runs in
 parallel with the existing `camera_->preview` → `XLinkOut("camera")` branch
 when `enable_video=true` and `h265_enable=true`. On multi-camera platforms,
 confirm USB / PoE bandwidth headroom during calibration
