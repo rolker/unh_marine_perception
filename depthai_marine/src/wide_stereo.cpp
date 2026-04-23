@@ -72,6 +72,18 @@ public:
 
     depthai_marine::CameraParams params;
 
+    if(!node->has_parameter("enable_video"))
+      node->declare_parameter("enable_video", params.enable_video);
+    params.enable_video = node->get_parameter("enable_video").as_bool();
+
+    if(!node->has_parameter("preview_width"))
+      node->declare_parameter("preview_width", params.preview_width);
+    params.preview_width = node->get_parameter("preview_width").as_int();
+
+    if(!node->has_parameter("preview_height"))
+      node->declare_parameter("preview_height", params.preview_height);
+    params.preview_height = node->get_parameter("preview_height").as_int();
+
     if(!node->has_parameter("video_width"))
       node->declare_parameter("video_width", params.video_width);
     params.video_width = node->get_parameter("video_width").as_int();
@@ -79,6 +91,10 @@ public:
     if(!node->has_parameter("video_height"))
       node->declare_parameter("video_height", params.video_height);
     params.video_height = node->get_parameter("video_height").as_int();
+
+    if(!node->has_parameter("fps"))
+      node->declare_parameter("fps", static_cast<double>(params.fps));
+    params.fps = static_cast<float>(node->get_parameter("fps").as_double());
 
     if(!node->has_parameter("h265_enable"))
       node->declare_parameter("h265_enable", params.h265_enable);
