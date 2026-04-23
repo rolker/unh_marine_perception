@@ -21,12 +21,10 @@
 class SegmentorCamera : public depthai_marine::CameraBase
 {
 public:
-  SegmentorCamera(std::shared_ptr<rclcpp::Node> node, std::string id, std::string name, bool enable_video, bool enable_nn, int width, int height, float fps)
+  SegmentorCamera(std::shared_ptr<rclcpp::Node> node, std::string id, std::string name, const depthai_marine::CameraParams & params, bool enable_nn)
   : depthai_marine::CameraBase(node), name_(name), enable_nn_(enable_nn)
   {
-    enableVideo(enable_video);
-    setPreviewSize(width, height);
-    setFps(fps);
+    applyParams(params);
     initialize(id, name);
     
     if (enable_nn_) {
@@ -134,16 +132,25 @@ class SeaSurfaceSegmentation : public rclcpp::Node
 public:
   SeaSurfaceSegmentation() : Node("sea_surface_segmentation_node")
   {
+    depthai_marine::CameraParams defaults;
+
     this->declare_parameter("camera_ids", std::vector<std::string>());
     this->declare_parameter("camera_names", std::vector<std::string>());
-    
+
     declare_parameter("neural_network", std::string(""));
-    
-    declare_parameter("enable_video", true);
+
+    declare_parameter("enable_video", defaults.enable_video);
     declare_parameter("enable_nn", true);
-    declare_parameter("preview_width", 1280);
-    declare_parameter("preview_height", 720);
-    declare_parameter("fps", 5.0);
+    declare_parameter("preview_width", defaults.preview_width);
+    declare_parameter("preview_height", defaults.preview_height);
+    declare_parameter("video_width", defaults.video_width);
+    declare_parameter("video_height", defaults.video_height);
+    declare_parameter("fps", static_cast<double>(defaults.fps));
+
+    declare_parameter("h265_enable", defaults.h265_enable);
+    declare_parameter("h265_bitrate_kbps", defaults.h265_bitrate_kbps);
+    declare_parameter("h265_keyframe_frequency_frames", defaults.h265_keyframe_frequency_frames);
+    declare_parameter("h265_profile", defaults.h265_profile);
   }
 
   void initialize()
@@ -156,15 +163,23 @@ public:
         return;
     }
 
-    bool enable_video = get_parameter("enable_video").as_bool();
+    depthai_marine::CameraParams params;
+    params.enable_video = get_parameter("enable_video").as_bool();
+    params.preview_width = get_parameter("preview_width").as_int();
+    params.preview_height = get_parameter("preview_height").as_int();
+    params.video_width = get_parameter("video_width").as_int();
+    params.video_height = get_parameter("video_height").as_int();
+    params.fps = static_cast<float>(get_parameter("fps").as_double());
+    params.h265_enable = get_parameter("h265_enable").as_bool();
+    params.h265_bitrate_kbps = get_parameter("h265_bitrate_kbps").as_int();
+    params.h265_keyframe_frequency_frames = get_parameter("h265_keyframe_frequency_frames").as_int();
+    params.h265_profile = get_parameter("h265_profile").as_string();
+
     bool enable_nn = get_parameter("enable_nn").as_bool();
-    int width = get_parameter("preview_width").as_int();
-    int height = get_parameter("preview_height").as_int();
-    float fps = get_parameter("fps").as_double();
 
     for (size_t i = 0; i < camera_ids.size(); ++i) {
         RCLCPP_INFO(get_logger(), "Initializing camera: %s (MxId: %s)", camera_names[i].c_str(), camera_ids[i].c_str());
-        auto cam = std::make_shared<SegmentorCamera>(shared_from_this(), camera_ids[i], camera_names[i], enable_video, enable_nn, width, height, fps);
+        auto cam = std::make_shared<SegmentorCamera>(shared_from_this(), camera_ids[i], camera_names[i], params, enable_nn);
         cameras_.push_back(cam);
     }
   }

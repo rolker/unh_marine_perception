@@ -13,10 +13,13 @@
   <depend>cv_bridge</depend>
   <depend>depthai</depend>
   <depend>depthai_bridge</depend>
+  <depend>ffmpeg_image_transport_msgs</depend>
   <depend>rclcpp</depend>
 
-  <!-- Used by benchmarks/h265_transport/ launch files; will become a runtime
-       dep here once on-device VideoEncoder integration lands. -->
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <!-- Runtime plugin that operator-side subscribers use to decode the
+       FFMPEGPacket stream published by depthai_marine when h265_enable=true. -->
   <exec_depend>ffmpeg_image_transport</exec_depend>
   <exec_depend>image_transport</exec_depend>
 
