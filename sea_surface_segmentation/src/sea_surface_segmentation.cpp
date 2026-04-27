@@ -21,18 +21,23 @@
 class SegmentorCamera : public depthai_marine::CameraBase
 {
 public:
-  SegmentorCamera(std::shared_ptr<rclcpp::Node> node, std::string id, std::string name, const depthai_marine::CameraParams & params, bool enable_nn)
+  SegmentorCamera(std::shared_ptr<rclcpp::Node> node, std::string id, std::string name, const depthai_marine::CameraParams & params, bool enable_nn, const std::string & frame_id_override = "")
   : depthai_marine::CameraBase(node), name_(name), enable_nn_(enable_nn)
   {
     applyParams(params);
     initialize(id, name);
-    
+
     if (enable_nn_) {
         segmentation_queue_ = device_->getOutputQueue("neural_network", 5, false);
 
         auto calibration_handler = device_->readCalibration();
-        
-        frame_id_ = name_ + "_optical_frame";
+
+        // Frame the segmentation Image + CameraInfo are stamped with.
+        // Default mirrors the historical behavior; an explicit override lets
+        // the platform launch align with its URDF-published frames (which on
+        // BizzyBoat live under the `bizzy/` namespace and use `_optical`,
+        // not `_optical_frame`).
+        frame_id_ = frame_id_override.empty() ? (name_ + "_optical_frame") : frame_id_override;
 
         segmentation_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(frame_id_, true);
         segmentation_camera_info_ = segmentation_converter_->calibrationToCameraInfo(calibration_handler, dai::CameraBoardSocket::CAM_A, 128, 96);
@@ -136,6 +141,9 @@ public:
 
     this->declare_parameter("camera_ids", std::vector<std::string>());
     this->declare_parameter("camera_names", std::vector<std::string>());
+    // Optional, per-camera. Empty entries (or a shorter array) fall back to
+    // the historical default: `<camera_name>_optical_frame`.
+    this->declare_parameter("frame_ids", std::vector<std::string>());
 
     declare_parameter("neural_network", std::string(""));
 
@@ -157,9 +165,16 @@ public:
   {
     std::vector<std::string> camera_ids = this->get_parameter("camera_ids").as_string_array();
     std::vector<std::string> camera_names = this->get_parameter("camera_names").as_string_array();
+    std::vector<std::string> frame_ids = this->get_parameter("frame_ids").as_string_array();
 
     if (camera_ids.size() != camera_names.size()) {
         RCLCPP_ERROR(this->get_logger(), "Number of camera IDs and names must match!");
+        return;
+    }
+    if (!frame_ids.empty() && frame_ids.size() != camera_names.size()) {
+        RCLCPP_ERROR(this->get_logger(),
+            "frame_ids length (%zu) must match camera_names length (%zu) when set",
+            frame_ids.size(), camera_names.size());
         return;
     }
 
@@ -178,8 +193,12 @@ public:
     bool enable_nn = get_parameter("enable_nn").as_bool();
 
     for (size_t i = 0; i < camera_ids.size(); ++i) {
-        RCLCPP_INFO(get_logger(), "Initializing camera: %s (MxId: %s)", camera_names[i].c_str(), camera_ids[i].c_str());
-        auto cam = std::make_shared<SegmentorCamera>(shared_from_this(), camera_ids[i], camera_names[i], params, enable_nn);
+        const std::string frame_id_override = (i < frame_ids.size()) ? frame_ids[i] : std::string();
+        RCLCPP_INFO(get_logger(),
+            "Initializing camera: %s (MxId: %s, frame_id: %s)",
+            camera_names[i].c_str(), camera_ids[i].c_str(),
+            frame_id_override.empty() ? "<default>" : frame_id_override.c_str());
+        auto cam = std::make_shared<SegmentorCamera>(shared_from_this(), camera_ids[i], camera_names[i], params, enable_nn, frame_id_override);
         cameras_.push_back(cam);
     }
   }
