@@ -18,7 +18,7 @@
 #include "depthai_marine/camera_base.hpp"
 #include "depthai_marine/image_publisher.hpp"
 
-#include "sea_surface_segmentation/frame_id_resolver.hpp"
+#include "frame_id_resolver.hpp"
 
 class SegmentorCamera : public depthai_marine::CameraBase
 {

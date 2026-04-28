@@ -1,5 +1,11 @@
 #pragma once
 
+// Private implementation header for the sea_surface_segmentation node.
+// Lives in src/ rather than include/ because the resolver has no
+// downstream consumers — it's exercised by `src/sea_surface_segmentation.cpp`
+// and by `test/test_frame_id_resolver.cpp`, nothing else.
+
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -31,7 +37,7 @@ inline std::vector<std::string> resolve_frame_ids(
 
   std::vector<std::string> resolved;
   resolved.reserve(camera_names.size());
-  for (size_t i = 0; i < camera_names.size(); ++i) {
+  for (std::size_t i = 0; i < camera_names.size(); ++i) {
     const bool have_override = i < frame_ids.size() && !frame_ids[i].empty();
     resolved.push_back(have_override ? frame_ids[i] : (camera_names[i] + "_optical_frame"));
   }

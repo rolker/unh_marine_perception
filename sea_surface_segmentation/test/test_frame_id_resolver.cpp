@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "sea_surface_segmentation/frame_id_resolver.hpp"
+#include "frame_id_resolver.hpp"
 
 using sea_surface_segmentation::resolve_frame_ids;
 

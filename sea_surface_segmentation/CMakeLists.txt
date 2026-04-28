@@ -29,10 +29,6 @@ add_executable(
   src/sea_surface_segmentation.cpp
 )
 
-target_include_directories(sea_surface_segmentation PRIVATE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-)
-
 target_link_libraries(sea_surface_segmentation
   depthai::core
   depthai_bridge::depthai_bridge
@@ -99,8 +95,10 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_frame_id_resolver test/test_frame_id_resolver.cpp)
+  # Resolver header is private to the executable (lives next to its
+  # .cpp in src/), so the test target needs its own path into src/.
   target_include_directories(test_frame_id_resolver PRIVATE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
 endif()
 
