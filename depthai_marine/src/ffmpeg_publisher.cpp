@@ -7,7 +7,8 @@ FFMPEGPublisher::FFMPEGPublisher(
   std::shared_ptr<dai::Device> device,
   const std::string & queue_name,
   const std::string & topic_name,
-  const std::string & encoding)
+  const std::string & encoding,
+  const std::string & frame_id)
 : node_(node),
   callback_id_(-1)
 {
@@ -16,7 +17,12 @@ FFMPEGPublisher::FFMPEGPublisher(
   // steady-clock base offset at construction; as long as both clocks advance
   // at the same rate (they do on Linux), two converters constructed moments
   // apart produce matching stamps for any given device frame.
-  converter_ = std::make_shared<dai::ros::ImageConverter>(topic_name, true);
+  //
+  // Empty frame_id → historical behavior: stamp with `topic_name`. Callers
+  // that want the URDF-aligned `<label>_optical_frame` default go through
+  // CameraBase::initialize(), which derives it before getting here.
+  const std::string & resolved_frame_id = frame_id.empty() ? topic_name : frame_id;
+  converter_ = std::make_shared<dai::ros::ImageConverter>(resolved_frame_id, true);
   converter_->setFFMPEGEncoding(encoding);
 
   publisher_ = node_->create_publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(
