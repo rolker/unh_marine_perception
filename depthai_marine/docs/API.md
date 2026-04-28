@@ -12,7 +12,7 @@ Base class for creating DepthAI camera nodes in the UNH Marine Autonomy framewor
 | Method | Description |
 |---|---|
 | `CameraBase(std::shared_ptr<rclcpp::Node> node)` | Constructor. Requires a ROS 2 node handle. |
-| `void initialize(std::string id, std::string label)` | Initializes the connection to the OAK device with the given MXID (`id`) and assigns a logger label. |
+| `void initialize(std::string id, std::string label, std::string frame_id = "")` | Initializes the connection to the OAK device with the given MXID (`id`) and assigns a logger label. `frame_id` stamps `header.frame_id` on every `Image` / `CameraInfo` / `FFMPEGPacket` from the publishers this method constructs; when empty, defaults to `<label>_optical_frame` (`image_geometry` / REP-103 convention). Pass explicitly for namespaced frames (e.g. `"bizzy/oak_forward_optical"`). |
 | `void applyParams(const CameraParams & params)` | Bulk-applies all per-camera settings before `initialize`. See `CameraParams`. |
 | `void setPreviewSize(int width, int height)` | Sets the resolution of the camera preview output (default 1280×720). |
 | `void setVideoSize(int width, int height)` | Sets the ISP output resolution that feeds both `video` (H.265 encoder input) and `preview` (default 1280×720). |
@@ -58,6 +58,12 @@ QoS is `rclcpp::SensorDataQoS()` to match the `ffmpeg_image_transport` subscribe
 convention. Instantiated automatically by `CameraBase::initialize()` when
 `h265_enable=true` — see [h265_transport.md](h265_transport.md).
 
+The constructor takes an optional `frame_id` parameter (after `encoding`) that
+stamps `header.frame_id` on every published `FFMPEGPacket`. When empty, falls
+back to `topic_name` for backwards compatibility; `CameraBase::initialize()`
+provides the URDF-aligned `<label>_optical_frame` default for callers that
+go through it.
+
 ### `depthai_marine::ImagePublisher`
 A helper class wrapping `depthai_bridge` to publish images from a DepthAI queue to a ROS 2 topic.
 
@@ -67,7 +73,7 @@ A helper class wrapping `depthai_bridge` to publish images from a DepthAI queue 
 #### Public Methods
 | Method | Description |
 |---|---|
-| `ImagePublisher(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<dai::Device> device, std::string queue_name, std::string topic_name)` | Connects a `DataOutputQueue` from the device to a ROS publisher on `topic_name`. |
+| `ImagePublisher(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<dai::Device> device, std::string queue_name, std::string topic_name, std::string frame_id = "")` | Connects a `DataOutputQueue` from the device to a ROS publisher on `topic_name`. `frame_id` stamps `header.frame_id` on every `Image` / `CameraInfo`; when empty, falls back to `topic_name` for backwards compatibility. Most callers should go through `CameraBase::initialize()`, which provides the URDF-aligned `<label>_optical_frame` default. |
 
 #### Usage Example
 ```cpp
