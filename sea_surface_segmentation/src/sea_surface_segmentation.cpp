@@ -36,7 +36,14 @@ public:
     enable_nn_(enable_nn)
   {
     applyParams(params);
-    initialize(id, name);
+    // Pass `frame_id_` (either a per-camera override from the `frame_ids`
+    // ROS param or the resolved `<name>_optical_frame` default) through to
+    // CameraBase so the sibling video / H.265 publishers stamp messages
+    // with the same frame_id as the NN/segmentation output. Without this,
+    // only the segmentation Image carried the URDF-aligned frame; video
+    // and H.265 packets fell back to the bare `name` (e.g. `oak_forward`),
+    // breaking TF lookups for any consumer of those topics.
+    initialize(id, name, frame_id_);
 
     if (enable_nn_) {
         segmentation_queue_ = device_->getOutputQueue("neural_network", 5, false);

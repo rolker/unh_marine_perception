@@ -33,7 +33,15 @@ class CameraBase
 public:
   CameraBase(std::shared_ptr<rclcpp::Node> node);
 
-  virtual void initialize(std::string id, std::string label);
+  // `frame_id` stamps `header.frame_id` on every Image / CameraInfo /
+  // FFMPEGPacket emitted by the publishers this method constructs. When
+  // empty, defaults to `<label>_optical_frame` (the URDF convention for
+  // `image_geometry`-style optical frames). Callers that want a different
+  // frame name (e.g. namespaced `bizzy/oak_forward_optical`) pass it
+  // explicitly. The previous behavior — `frame_id == label` — is not
+  // preserved on this path; callers that need the raw `label` must pass
+  // it through explicitly.
+  virtual void initialize(std::string id, std::string label, std::string frame_id = "");
   void applyParams(const CameraParams & params);
   void setPreviewSize(int width, int height);
   void setVideoSize(int width, int height);
