@@ -115,12 +115,19 @@ TEST(CameraBaseValidation, SetH265KeyframeFrequencyFramesRejectsNonPositive)
   EXPECT_NO_THROW(base.setH265KeyframeFrequencyFrames(30));
 }
 
-TEST(ApplyParams, RoundTripH265Pipeline)
+TEST(ApplyParams, RoundTripEncoderPipelineH264Profile)
 {
   // Round-trip: a non-default CameraParams should drive applyParams() and
   // emerge through getPipeline() without throwing. Catches the case where
   // a future setter starts validating in a way the others don't.
-  auto node = std::make_shared<rclcpp::Node>("applyparams_roundtrip_h265_test");
+  //
+  // `h265_enable` is the encoder-pipeline gate, not strictly the H.265
+  // gate — getPipeline() spins up a VideoEncoder when it's true, with
+  // `h265_profile` deciding the actual codec (H264_* or H265_*). We
+  // pick H264_HIGH here precisely to exercise that distinction: the
+  // encoder branch must be reachable for every supported profile, not
+  // just H265_MAIN.
+  auto node = std::make_shared<rclcpp::Node>("applyparams_roundtrip_encoder_h264_test");
   CameraBase base(node);
   depthai_marine::CameraParams params;
   params.preview_width = 640;

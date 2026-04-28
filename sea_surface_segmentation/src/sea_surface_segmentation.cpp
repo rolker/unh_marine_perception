@@ -145,8 +145,11 @@ public:
 
     this->declare_parameter("camera_ids", std::vector<std::string>());
     this->declare_parameter("camera_names", std::vector<std::string>());
-    // Optional, per-camera. Empty entries (or a shorter array) fall back to
-    // the historical default: `<camera_name>_optical_frame`.
+    // Optional. Either empty (every camera gets the historical default
+    // `<camera_name>_optical_frame`) or the same length as camera_names
+    // (per-camera override; a per-entry empty string falls back to the
+    // historical default for that one camera). Any other length is a
+    // configuration error and the node refuses to initialize.
     this->declare_parameter("frame_ids", std::vector<std::string>());
 
     declare_parameter("neural_network", std::string(""));
