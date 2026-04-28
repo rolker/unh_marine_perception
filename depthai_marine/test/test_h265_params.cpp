@@ -115,6 +115,74 @@ TEST(CameraBaseValidation, SetH265KeyframeFrequencyFramesRejectsNonPositive)
   EXPECT_NO_THROW(base.setH265KeyframeFrequencyFrames(30));
 }
 
+TEST(ApplyParams, RoundTripEncoderPipelineH264Profile)
+{
+  // Round-trip: a non-default CameraParams should drive applyParams() and
+  // emerge through getPipeline() without throwing. Catches the case where
+  // a future setter starts validating in a way the others don't.
+  //
+  // `h265_enable` is the encoder-pipeline gate, not strictly the H.265
+  // gate — getPipeline() spins up a VideoEncoder when it's true, with
+  // `h265_profile` deciding the actual codec (H264_* or H265_*). We
+  // pick H264_HIGH here precisely to exercise that distinction: the
+  // encoder branch must be reachable for every supported profile, not
+  // just H265_MAIN.
+  auto node = std::make_shared<rclcpp::Node>("applyparams_roundtrip_encoder_h264_test");
+  CameraBase base(node);
+  depthai_marine::CameraParams params;
+  params.preview_width = 640;
+  params.preview_height = 360;
+  params.video_width = 1920;
+  params.video_height = 1080;
+  params.fps = 10.0f;
+  params.enable_video = true;
+  params.h265_enable = true;
+  params.h265_bitrate_kbps = 800;
+  params.h265_keyframe_frequency_frames = 60;
+  params.h265_profile = "H264_HIGH";
+  EXPECT_NO_THROW(base.applyParams(params));
+  EXPECT_NO_THROW(base.getPipeline());
+}
+
+TEST(ApplyParams, InvalidVideoSizeFromParamsThrows)
+{
+  // applyParams should propagate the per-setter validation. Any param
+  // that fails its own validator must fail applyParams().
+  auto node = std::make_shared<rclcpp::Node>("applyparams_invalid_video_test");
+  CameraBase base(node);
+  depthai_marine::CameraParams params;
+  params.video_width = 0;  // setVideoSize rejects this
+  EXPECT_THROW(base.applyParams(params), std::invalid_argument);
+}
+
+TEST(SetH265Profile, InvalidProfileFailsLazilyAtPipelineAssembly)
+{
+  // setH265Profile is intentionally lazy — the string is only validated
+  // when getPipeline() / initialize() needs to map it to a DepthAI
+  // Profile enum. This test pins that contract: an invalid profile is
+  // accepted by the setter but rejected at pipeline assembly when h265
+  // is enabled. Keeps a future "validate eagerly" change from silently
+  // changing the failure point on platforms.
+  auto node = std::make_shared<rclcpp::Node>("setprofile_lazy_test");
+  CameraBase base(node);
+  EXPECT_NO_THROW(base.setH265Profile("NOT_A_REAL_PROFILE"));
+  base.enableH265(true);
+  EXPECT_THROW(base.getPipeline(), std::invalid_argument);
+}
+
+TEST(SetH265Profile, InvalidProfileIsBenignWhenH265Disabled)
+{
+  // The lazy validation only fires when h265 is enabled. With h265 off,
+  // a stale/garbage profile string must not break pipeline assembly —
+  // BizzyBoat ships some cameras with h265_enable=False, and those
+  // shouldn't trip on a profile string they never use.
+  auto node = std::make_shared<rclcpp::Node>("setprofile_disabled_test");
+  CameraBase base(node);
+  base.setH265Profile("NOT_A_REAL_PROFILE");
+  base.enableH265(false);
+  EXPECT_NO_THROW(base.getPipeline());
+}
+
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

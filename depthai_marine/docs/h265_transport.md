@@ -26,8 +26,11 @@ timestamps for each physical frame.
 Field mapping on each `FFMPEGPacket` (filled in by `toRosFFMPEGPacket`):
 
 - `header.stamp` — ROS time, base-offset from `EncodedFrame::getTimestamp()`.
-- `header.frame_id` — the camera label passed to `FFMPEGPublisher` (same as the
-  sibling `sensor_msgs/Image`'s `frame_id`).
+- `header.frame_id` — the `frame_id` passed to `FFMPEGPublisher` (same as the
+  sibling `sensor_msgs/Image`'s `frame_id`). When `CameraBase::initialize()`
+  constructs the publisher, this defaults to `<label>_optical_frame` to match
+  the URDF / `image_geometry` convention; callers can override by passing an
+  explicit `frame_id` to `initialize()`.
 - `width` / `height` — from `EncodedFrame::getWidth()` / `getHeight()`.
 - `encoding` — `"hevc"` for H.265 profiles, `"h264"` for H.264 profiles;
   configured via `ImageConverter::setFFMPEGEncoding` at `FFMPEGPublisher`

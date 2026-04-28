@@ -18,21 +18,37 @@
 #include "depthai_marine/camera_base.hpp"
 #include "depthai_marine/image_publisher.hpp"
 
+#include "frame_id_resolver.hpp"
+
 class SegmentorCamera : public depthai_marine::CameraBase
 {
 public:
-  SegmentorCamera(std::shared_ptr<rclcpp::Node> node, std::string id, std::string name, const depthai_marine::CameraParams & params, bool enable_nn)
-  : depthai_marine::CameraBase(node), name_(name), enable_nn_(enable_nn)
+  SegmentorCamera(
+    std::shared_ptr<rclcpp::Node> node,
+    std::string id,
+    std::string name,
+    const depthai_marine::CameraParams & params,
+    bool enable_nn,
+    std::string frame_id)
+  : depthai_marine::CameraBase(node),
+    name_(name),
+    frame_id_(std::move(frame_id)),
+    enable_nn_(enable_nn)
   {
     applyParams(params);
-    initialize(id, name);
-    
+    // Pass `frame_id_` (either a per-camera override from the `frame_ids`
+    // ROS param or the resolved `<name>_optical_frame` default) through to
+    // CameraBase so the sibling video / H.265 publishers stamp messages
+    // with the same frame_id as the NN/segmentation output. Without this,
+    // only the segmentation Image carried the URDF-aligned frame; video
+    // and H.265 packets fell back to the bare `name` (e.g. `oak_forward`),
+    // breaking TF lookups for any consumer of those topics.
+    initialize(id, name, frame_id_);
+
     if (enable_nn_) {
         segmentation_queue_ = device_->getOutputQueue("neural_network", 5, false);
 
         auto calibration_handler = device_->readCalibration();
-        
-        frame_id_ = name_ + "_optical_frame";
 
         segmentation_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(frame_id_, true);
         segmentation_camera_info_ = segmentation_converter_->calibrationToCameraInfo(calibration_handler, dai::CameraBoardSocket::CAM_A, 128, 96);
@@ -136,6 +152,12 @@ public:
 
     this->declare_parameter("camera_ids", std::vector<std::string>());
     this->declare_parameter("camera_names", std::vector<std::string>());
+    // Optional. Either empty (every camera gets the historical default
+    // `<camera_name>_optical_frame`) or the same length as camera_names
+    // (per-camera override; a per-entry empty string falls back to the
+    // historical default for that one camera). Any other length is a
+    // configuration error and the node refuses to initialize.
+    this->declare_parameter("frame_ids", std::vector<std::string>());
 
     declare_parameter("neural_network", std::string(""));
 
@@ -157,10 +179,19 @@ public:
   {
     std::vector<std::string> camera_ids = this->get_parameter("camera_ids").as_string_array();
     std::vector<std::string> camera_names = this->get_parameter("camera_names").as_string_array();
+    std::vector<std::string> frame_ids = this->get_parameter("frame_ids").as_string_array();
 
     if (camera_ids.size() != camera_names.size()) {
         RCLCPP_ERROR(this->get_logger(), "Number of camera IDs and names must match!");
         return;
+    }
+
+    std::vector<std::string> resolved_frame_ids;
+    try {
+      resolved_frame_ids = sea_surface_segmentation::resolve_frame_ids(camera_names, frame_ids);
+    } catch (const std::invalid_argument & e) {
+      RCLCPP_ERROR(this->get_logger(), "%s", e.what());
+      return;
     }
 
     depthai_marine::CameraParams params;
@@ -178,8 +209,17 @@ public:
     bool enable_nn = get_parameter("enable_nn").as_bool();
 
     for (size_t i = 0; i < camera_ids.size(); ++i) {
-        RCLCPP_INFO(get_logger(), "Initializing camera: %s (MxId: %s)", camera_names[i].c_str(), camera_ids[i].c_str());
-        auto cam = std::make_shared<SegmentorCamera>(shared_from_this(), camera_ids[i], camera_names[i], params, enable_nn);
+        RCLCPP_INFO(get_logger(),
+            "Initializing camera: %s (MxId: %s, frame_id: %s)",
+            camera_names[i].c_str(), camera_ids[i].c_str(),
+            resolved_frame_ids[i].c_str());
+        auto cam = std::make_shared<SegmentorCamera>(
+            shared_from_this(),
+            camera_ids[i],
+            camera_names[i],
+            params,
+            enable_nn,
+            resolved_frame_ids[i]);
         cameras_.push_back(cam);
     }
   }

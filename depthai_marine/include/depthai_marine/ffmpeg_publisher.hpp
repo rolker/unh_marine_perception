@@ -28,12 +28,18 @@ namespace depthai_marine {
 class FFMPEGPublisher
 {
 public:
+  // `frame_id` stamps `header.frame_id` on every published FFMPEGPacket.
+  // When empty, falls back to `topic_name` to preserve the historical
+  // default. Callers that want the URDF-aligned `<label>_optical_frame`
+  // default should go through `CameraBase::initialize()`, which derives it
+  // for them.
   FFMPEGPublisher(
     std::shared_ptr<rclcpp::Node> node,
     std::shared_ptr<dai::Device> device,
     const std::string & queue_name,
     const std::string & topic_name,
-    const std::string & encoding);
+    const std::string & encoding,
+    const std::string & frame_id = "");
 
   ~FFMPEGPublisher();
 

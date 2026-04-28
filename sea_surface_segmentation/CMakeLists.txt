@@ -92,4 +92,14 @@ install(
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_frame_id_resolver test/test_frame_id_resolver.cpp)
+  # Resolver header is private to the executable (lives next to its
+  # .cpp in src/), so the test target needs its own path into src/.
+  target_include_directories(test_frame_id_resolver PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+endif()
+
 ament_package()

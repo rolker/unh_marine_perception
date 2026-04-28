@@ -36,7 +36,7 @@ std::string CameraBase::profileEncoding(dai::VideoEncoderProperties::Profile pro
   }
 }
 
-void CameraBase::initialize(std::string id, std::string label)
+void CameraBase::initialize(std::string id, std::string label, std::string frame_id)
 {
   auto pipeline = getPipeline();
 
@@ -62,8 +62,15 @@ void CameraBase::initialize(std::string id, std::string label)
 
   RCLCPP_INFO_STREAM(node_->get_logger(), label << ": Connected to device: " <<  device_->getDeviceInfo().toString());
 
+  // URDF-aligned default: `<label>_optical_frame` matches the
+  // `image_geometry` / REP-103 convention for camera optical frames. This
+  // is a behavioral change from the historical default (which was the bare
+  // `label`) — callers that need the raw `label` must now pass it
+  // explicitly. See sea_surface_segmentation for the pass-through pattern.
+  const std::string resolved_frame_id = frame_id.empty() ? (label + "_optical_frame") : frame_id;
+
   if (enable_video_) {
-    camera_publisher_ = std::make_shared<ImagePublisher>(node_, device_, "camera", label);
+    camera_publisher_ = std::make_shared<ImagePublisher>(node_, device_, "camera", label, resolved_frame_id);
   }
 
   if (h265_enable_) {
@@ -73,7 +80,8 @@ void CameraBase::initialize(std::string id, std::string label)
       device_,
       "ffmpeg",
       label,
-      profileEncoding(profile));
+      profileEncoding(profile),
+      resolved_frame_id);
   }
 }
 
