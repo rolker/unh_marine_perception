@@ -29,56 +29,52 @@ Root cause was diagnosed in umbrella issue #10:
 
 1. **Acquire `costmap_mutex_` in `matchSize()`** — wrap the `resizeMap` and
    field updates in a `lock_guard`. Safe to acquire in `onInitialize` (no
-   subscribers exist yet, no contention). No deadlock risk: no other
-   `costmap_mutex_`-holding code path calls `matchSize`.
+   subscribers exist yet, no contention). No deadlock risk in this file's own
+   call paths; cross-check during implementation that nav2's external
+   `Layer::reset()`/`matchSize()` invocations don't already hold
+   `costmap_mutex_`.
 2. **Acquire `costmap_mutex_` and guard against zero-size in `reset()`** —
    skip the `resetMapToValue` call when `count_x_ == 0 || count_y_ == 0`.
-3. **Add gtest `test_sea_surface_layer_lifecycle.cpp`** — construct a
-   `LayeredCostmap` master, add the layer via the plugin loader (or directly,
-   if simpler), and exercise: (a) `matchSize` with several distinct parent
-   sizes/origins/resolutions; (b) `reset()` called before any `matchSize`
-   (regression for B); (c) concurrent `matchSize` + a stand-in for
-   `segmentsCallback` writes (regression for A). The goal is not a perfect
-   reproducer of the race — those are flaky — but to exercise the lifecycle
-   paths under load enough that TSan or a debug build catches misuse.
+
+Issue #6's "Reproduce on a recent build" and "Capture stack trace" acceptance
+criteria are satisfied by umbrella #10's static diagnosis (mechanism, trigger,
+and code path all named) — end-to-end runtime reproduction is the verification
+step in #7, not a prerequisite for landing the patch.
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
 | `sea_surface_segmentation/src/sea_surface_layer.cpp` | Lock in `matchSize()`; lock + zero-size guard in `reset()` |
-| `sea_surface_segmentation/test/test_sea_surface_layer_lifecycle.cpp` | New gtest (lifecycle + concurrent matchSize) |
-| `sea_surface_segmentation/CMakeLists.txt` | Wire new test into `BUILD_TESTING` block; link `nav2_costmap_2d` to test target |
 
 ## Principles Self-Check
 
 | Principle | Consideration |
 |---|---|
-| A change includes its consequences | Test added in same PR (acceptance criterion). Umbrella #10 items C/G/J intentionally deferred to a separate cleanup PR — surfaced as scope decision, not silent deferral. |
-| Test what breaks | Test exercises the actual failure mode (matchSize lifecycle, pre-init reset), not getter/setter glue. Race repro is best-effort; primary value is no-crash assertions across realistic call patterns. |
-| Only what's needed | No restructure of `updateBounds` (items C/D from #10), no rewrite of the per-cell loop (item I). Fix is minimum-viable for the crash. |
+| A change includes its consequences | Test deferred to threading-hygiene PR with #10 items E+F+L (test design lands once against the final locking strategy, instead of being built now and rewritten when E/F refine the locks). Umbrella #10 items C/G/J also deferred — both deferrals surfaced as scope decisions, not silent. |
+| Test what breaks | Boat verification (#7) is the meaningful runtime test for this crash; synthetic unit tests against the current half-locked state would be throwaway once E/F land. |
+| Only what's needed | No restructure of `updateBounds` (items C/D from #10), no rewrite of the per-cell loop (item I), no test plumbing built twice. Fix is minimum-viable for the crash. |
 
 ## ADR Compliance
 
 | ADR | Triggered | How addressed |
 |---|---|---|
-| 0008 (ROS 2 conventions) | Yes | gtest via `ament_add_gtest`, matching existing `test_frame_id_resolver` style. No new lint exceptions. |
+| 0008 (ROS 2 conventions) | Yes | nav2 costmap layer convention: mutex around buffer-reallocation paths. No new lint exceptions. |
 
 ## Consequences
 
 | If we change... | Also update... | Included in plan? |
 |---|---|---|
 | `SeaSurfaceLayer` locking | `controller_server` costmap config on bizzy (re-enable layer) | No — deliberately deferred to #7 (boat verification step) |
-| Add gtest | `CMakeLists.txt`, `package.xml` test_depends if needed | Yes |
 | Mutex semantics | umbrella #10 items E/F (other unsynchronized accesses) | No — separate threading-hygiene pass, tracked in #10 |
+| Test coverage | umbrella #10 item L (no regression test) | No — bundled with the E+F threading-hygiene PR so tests are designed once against the final locking strategy |
 
 ## Open Questions
 
-- None at plan stage. Test fixture style (direct plugin construction vs.
-  `pluginlib` load) decided during implementation based on what builds
-  cleanly against `nav2_costmap_2d`'s headers.
+- None at plan stage.
 
 ## Estimated Scope
 
-Single PR. Issue #6 stays open after merge until boat re-enable on bizzy
-confirms no crash (verification step is #7).
+Single PR, small (~10-line diff in `sea_surface_layer.cpp`). Issue #6 stays
+open after merge until boat re-enable on bizzy confirms no crash (verification
+step is #7).

@@ -55,6 +55,11 @@ public:
 
   void reset() override
   {
+    std::lock_guard<std::mutex> lock(costmap_mutex_);
+    // Skip when matchSize() has not yet run: count_x_-1 would underflow.
+    if (count_x_ == 0 || count_y_ == 0) {
+      return;
+    }
     segments_costmap_.resetMapToValue(0, 0, count_x_-1, count_y_-1, nav2_costmap_2d::NO_INFORMATION);
   }
 
@@ -113,7 +118,12 @@ public:
   {
     RCLCPP_INFO_STREAM(logger_, "Matching size of SeaSurfaceLayer to parent costmap");
     auto parent = layered_costmap_->getCostmap();
-    
+
+    // Lock around resizeMap — it deletes and reallocates the costmap buffer,
+    // racing with segmentsCallback's setCost loop on rolling-window costmaps
+    // where updateBounds triggers matchSize on every origin shift (#6).
+    std::lock_guard<std::mutex> lock(costmap_mutex_);
+
     origin_x_ = parent->getOriginX();
     origin_y_ = parent->getOriginY();
     resolution_ = parent->getResolution();
