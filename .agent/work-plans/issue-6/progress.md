@@ -22,3 +22,15 @@ Static analysis (cpplint) clean on added lines — flagged pre-existing whitespa
 violations on context lines only. Copilot Adversarial returned "No findings."
 Build + existing 7 tests pass. Plan in sync with implementation. Test coverage
 deferred to threading-hygiene PR per umbrella #10 items E+F+L.
+
+## External Review
+**Status**: complete
+**When**: 2026-05-21
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+
+**PR**: #11 — 1 review (Copilot), 1 valid finding, 0 false positives
+**CI**: all pass
+
+### Actions
+- [ ] Move `matchSize()` in `onInitialize` to before `create_subscription` calls (race window: pre-init `segmentsCallback` dispatch)
+- [ ] Add zero-size guard in `segmentsCallback` before `resetMapToValue` (defensive)
