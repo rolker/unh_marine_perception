@@ -30,11 +30,18 @@ Root cause was diagnosed in umbrella issue #10:
 1. **Acquire `costmap_mutex_` in `matchSize()`** — wrap the `resizeMap` and
    field updates in a `lock_guard`. Safe to acquire in `onInitialize` (no
    subscribers exist yet, no contention). No deadlock risk in this file's own
-   call paths; cross-check during implementation that nav2's external
-   `Layer::reset()`/`matchSize()` invocations don't already hold
-   `costmap_mutex_`.
+   call paths.
 2. **Acquire `costmap_mutex_` and guard against zero-size in `reset()`** —
    skip the `resetMapToValue` call when `count_x_ == 0 || count_y_ == 0`.
+3. **Reorder `onInitialize` so `matchSize()` runs before `create_subscription`** —
+   without this, a multi-threaded executor with pre-existing publishers can
+   dispatch `cameraInfoCallback` then `segmentsCallback` in the window between
+   subscriber creation and `matchSize`, hitting the same `count_x_-1`
+   underflow on the `segmentsCallback` `resetMapToValue` path. Surfaced by
+   Copilot review on PR #11.
+4. **Add the same zero-size guard in `segmentsCallback`** before its
+   `resetMapToValue` call. Defensive belt-and-suspenders so future reorderings
+   can't reintroduce the underflow class.
 
 Issue #6's "Reproduce on a recent build" and "Capture stack trace" acceptance
 criteria are satisfied by umbrella #10's static diagnosis (mechanism, trigger,

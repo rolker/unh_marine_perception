@@ -35,6 +35,14 @@ public:
     std::string camera_info_topic;
     node->get_parameter(name_+".camera_info_topic", camera_info_topic);
 
+    global_frame_id_ = layered_costmap_->getGlobalFrameID();
+
+    // Initialize sizes before wiring subscribers. Under a multi-threaded
+    // executor with pre-existing publishers, a queued segmentation message
+    // could otherwise dispatch segmentsCallback before matchSize() runs,
+    // hitting the same count_x_-1 underflow that reset() guards against.
+    matchSize();
+
     segments_subscriber_ = node->create_subscription<sensor_msgs::msg::Image>(
       segmentation_topic,
       rclcpp::SensorDataQoS(),
@@ -46,11 +54,6 @@ public:
       rclcpp::SensorDataQoS(),
       std::bind(&SeaSurfaceLayer::cameraInfoCallback, this, std::placeholders::_1)
     );
-
-    global_frame_id_ = layered_costmap_->getGlobalFrameID();
-
-    matchSize();
-
   }
 
   void reset() override
@@ -156,6 +159,12 @@ private:
 
         std::lock_guard<std::mutex> lock(costmap_mutex_);
 
+        // Defensive guard: matchSize() runs before subscribers are created,
+        // but keep the invariant local so future reorderings can't reintroduce
+        // the count_x_-1 underflow.
+        if (count_x_ == 0 || count_y_ == 0) {
+          return;
+        }
         segments_costmap_.resetMapToValue(0, 0, count_x_-1, count_y_-1, nav2_costmap_2d::NO_INFORMATION);
 
         for(unsigned int i = 0; i < count_x_; i++)
