@@ -1,4 +1,6 @@
 
+#include <algorithm>
+
 #include "cv_bridge/cv_bridge.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "image_geometry/pinhole_camera_model.hpp"
@@ -72,16 +74,13 @@ public:
     double robot_x, double robot_y, double robot_yaw,
     double* min_x, double* min_y,
     double* max_x, double* max_y) override
-
   {
-   // if(updated_)
-    {
-      *min_x = robot_x - maximum_range_;
-      *min_y = robot_y - maximum_range_;
-      *max_x = robot_x + maximum_range_;
-      *max_y = robot_y + maximum_range_;
-      updated_ = false;
-    }
+    // Expand the master bounds rather than overwrite — clobbering would drop
+    // bounds contributions from earlier layers in the chain (chart_layer, etc.).
+    *min_x = std::min(*min_x, robot_x - maximum_range_);
+    *min_y = std::min(*min_y, robot_y - maximum_range_);
+    *max_x = std::max(*max_x, robot_x + maximum_range_);
+    *max_y = std::max(*max_y, robot_y + maximum_range_);
 
     auto parent = layered_costmap_->getCostmap();
 
@@ -140,8 +139,6 @@ private:
   std::string global_frame_id_;
 
   double update_timeout_ = 0.5;
-
-  bool updated_ = false;
 
   void segmentsCallback(const sensor_msgs::msg::Image::SharedPtr segments_msg)
   {
@@ -203,6 +200,8 @@ private:
                pixel.y >= 0 && pixel.y < static_cast<int>(image->image.rows))
             {
               auto pixel_value = image->image.at<cv::Vec3b>(pixel);
+              // Segmentation channel convention: dominant R marks non-water
+              // (lethal obstacle); dominant G/B marks water (free space).
               if(pixel_value[0] > pixel_value[1] && pixel_value[0] > pixel_value[2])
               {
                 segments_costmap_.setCost(i, j, nav2_costmap_2d::LETHAL_OBSTACLE);
@@ -214,7 +213,6 @@ private:
             }
           }
         }
-        updated_ = true;
       }
       catch(const std::exception& e)
       {
