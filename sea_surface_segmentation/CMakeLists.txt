@@ -100,6 +100,18 @@ if(BUILD_TESTING)
   target_include_directories(test_frame_id_resolver PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
+
+  # segments_apply.hpp is private to the layer (lives next to
+  # sea_surface_layer.cpp in src/); test target reaches into src/
+  # the same way test_frame_id_resolver does. Links against
+  # nav2_costmap_2d_core for Costmap2D.
+  ament_add_gtest(test_segments_apply test/test_segments_apply.cpp)
+  target_include_directories(test_segments_apply PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(test_segments_apply
+    nav2_costmap_2d::nav2_costmap_2d_core
+  )
 endif()
 
 ament_package()

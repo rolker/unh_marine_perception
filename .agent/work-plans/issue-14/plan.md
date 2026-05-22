@@ -33,10 +33,15 @@ full rolling-window grid, the loop calls `segments_costmap_.getCost(i, 1600)`
 which reads past the buffer end → SIGSEGV.
 
 **Why intermittent + multi-instance-specific:** PR #13 changed the
-`updateBounds` clobber pattern to `std::min/std::max`. With 4 layers + chart_layer
-all contributing bounds, the union reliably reaches the grid edge every cycle.
-With a single SeaSurfaceLayer, max_i often stayed below size_x and the
-off-by-one read landed within mapped heap memory (silently wrong, no crash).
+`updateBounds` clobber pattern to `std::min/std::max`. With that fix in place,
+`chart_layer`'s wider bounds (set first in the plugin list) now **survive**
+each SeaSurfaceLayer's `updateBounds` call instead of being clobbered. With 4
+SeaSurfaceLayer instances + chart_layer contributing, the surviving union
+reliably reaches the grid edge every cycle. Pre-#13 single-instance had max_i
+often below size_x, so the off-by-one read landed within mapped heap memory
+(silently wrong, no crash). The trigger is "chart_layer bounds survive" more
+than "4 layers" per se — but the 4-layer config is what made it deterministic
+enough to surface in the field.
 
 Three sites in `sea_surface_layer.cpp` have the same inclusive-vs-exclusive
 confusion:
@@ -60,24 +65,42 @@ exclusive (`for (y = y0; y < yn; …)` internally), so the right arguments are
    `count_x_` (and `count_y_-1` to `count_y_`). The `count_x_ == 0 ||
    count_y_ == 0` guards remain — they're still needed if `matchSize` hasn't
    run yet.
-3. **Verification** — field re-cycle on gabby with the 4-layer config that
-   currently crashes ~1-in-3 launches. Per issue #6's pattern (PR #11),
-   field re-test is the meaningful regression check, not a synthetic unit test;
-   the stack trace already names the exact code path and the fix is mechanical.
-   Re-cycle the launch 5+ times on gabby and confirm no SIGSEGV.
+3. **Extract `apply_segments_to_master` as a pure free function** in a new
+   header `src/segments_apply.hpp` — same pattern as `frame_id_resolver.hpp`
+   was extracted for testability. `updateCosts` becomes a thin wrapper that
+   takes the mutex then delegates. The free function operates on two
+   `Costmap2D&` references — no `Layer` base, no `LayeredCostmap`, no TF —
+   so it's directly unit-testable.
+4. **Add gtest cases** in `test/test_segments_apply.cpp`:
+   - **`HalfOpenBoundsRespected`** — call with `max_i < size_x` and verify
+     the row at `max_i` is untouched. Pre-fix `<=` fails this; post-fix
+     passes.
+   - **`GridEdgeBoundsDoesNotCrash`** — call with `max_i == size_x,
+     max_j == size_y`. Pre-fix would read past the buffer end (the
+     SIGSEGV from gabby's gdb trace). Post-fix completes cleanly.
+   - **`NoInformationCellsSkipped`** and **`MasterMaxKept`** — confirm the
+     `NO_INFORMATION` skip and the `cost > master.getCost(i, j)` max-keep
+     semantics are preserved across the refactor.
+5. **Verification** — locally: `colcon test --packages-select
+   sea_surface_segmentation` passes the new tests. In the field on gabby:
+   re-cycle the nav launch 5+ times with the 4-layer config that crashed
+   ~1-in-2 launches in the 2026-05-22 gdb session; confirm no SIGSEGV.
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
-| `sea_surface_segmentation/src/sea_surface_layer.cpp` | `<=` → `<` in `updateCosts` (2 sites); `count_x_-1` → `count_x_`, `count_y_-1` → `count_y_` in `reset()` and `segmentsCallback`'s `resetMapToValue` (2 sites) |
+| `sea_surface_segmentation/src/segments_apply.hpp` (new) | Header-only free function `apply_segments_to_master(segments, master, min_i, min_j, max_i, max_j)` with half-open loop bounds (`<`, not `<=`). |
+| `sea_surface_segmentation/src/sea_surface_layer.cpp` | `updateCosts` calls the new free function; `count_x_-1` → `count_x_`, `count_y_-1` → `count_y_` in `reset()` and `segmentsCallback`'s `resetMapToValue` (2 sites). |
+| `sea_surface_segmentation/test/test_segments_apply.cpp` (new) | Four gtest cases covering half-open bounds, grid-edge non-crash, NO_INFORMATION skip, max-keep semantics. |
+| `sea_surface_segmentation/CMakeLists.txt` | Register the new test target (mirroring the `test_frame_id_resolver` pattern). |
 
 ## Principles Self-Check
 
 | Principle | Consideration |
 |---|---|
-| A change includes its consequences | Field verification (cycle-the-launch repro is documented in the PR body) is the regression check. Unit-test scaffolding for a costmap_2d::Layer subclass requires a `LayeredCostmap` fixture + `tf2_ros::Buffer` — adding it for a 5-line mechanical fix is over-scoped. Surfaced as a scope decision, not a silent skip. |
-| Test what breaks | The failure mode (read past buffer end when `max_i == size_x`) was caught in the field with gdb, not by tests. A regression test would need to invoke `updateCosts` directly with grid-edge bounds — that's a follow-up issue if it becomes a recurring problem class. |
+| A change includes its consequences | Pure-function extraction + unit tests land with the fix. Field re-cycle on gabby is documented in the PR body as the in-context verification. |
+| Test what breaks | `HalfOpenBoundsRespected` and `GridEdgeBoundsDoesNotCrash` directly target the failure mode that produced the field SIGSEGV. `NoInformationCellsSkipped`/`MasterMaxKept` pin the refactor's behavioral equivalence. |
 | Only what's needed | No threading-hygiene rework (umbrella #10 items E/F) — the gdb trace is in the `mapUpdateLoop` thread, not a subscription callback. The race hypotheses in #10 are not the cause. |
 | Improve incrementally | Minimum-viable patch for the crash. Leaves the `count_x_ == 0` zero-guards in place. |
 
@@ -92,7 +115,7 @@ exclusive (`for (y = y0; y < yn; …)` internally), so the right arguments are
 | If we change... | Also update... | Included in plan? |
 |---|---|---|
 | `updateCosts` loop bounds | umbrella issue #10 items E/F (threading-race hypotheses) | Yes — close them as "not the cause; see PR" rather than leaving them open as speculative items. |
-| The layer's behavior at grid edges | `seafloor_echoboat_project11`'s 4-layer config (PR #19 / field workaround PR #21) | Yes — once merged, revert PR #21's workaround on gitcloud's `main` so the 4-layer config is the active deployment state. Logged as a follow-up step, not part of this PR. |
+| The layer's behavior at grid edges | `seafloor_echoboat_project11`'s 4-layer config (PR #19 / field workaround PR #21) | Yes — supersede the field workaround once gabby verifies clean: if `seafloor_echoboat_project11#21` is still open, close it without merging and the 4-layer config remains the deployed state; if it merged ahead, file a follow-up PR re-enabling the 3 commented-out layers. Logged as a follow-up step, not part of this PR. |
 | `segmentsCallback`'s `resetMapToValue` bounds | Nothing else — internal to the layer. | n/a |
 
 ## Open Questions
@@ -101,8 +124,9 @@ exclusive (`for (y = y0; y < yn; …)` internally), so the right arguments are
 
 ## Estimated Scope
 
-Single PR, ~5-line diff in `sea_surface_layer.cpp`. Field re-cycle (5+ launch
-attempts post-merge on gabby) is the verification step.
+Single PR. Code: ~25 lines (header + thin `updateCosts` wrapper + 3 one-character
+fixes). Test: ~80 lines (4 focused gtest cases). CMakeLists: +5 lines. Total
+~110-line diff. Field re-cycle on gabby is the in-context verification.
 
 ## Followups (not in this PR)
 
@@ -110,8 +134,10 @@ attempts post-merge on gabby) is the verification step.
   threading races were the wrong hypothesis; the gdb trace shows the crash
   is in `mapUpdateLoop`, not in `segmentsCallback`. Item L (no regression
   test) stands.
-- **Revert `seafloor_echoboat_project11#21`** field workaround on gitcloud
-  once gabby's verified 5-cycle-clean post-fix.
+- **Supersede `seafloor_echoboat_project11#21`** field workaround on gitcloud
+  once gabby's verified 5-cycle-clean post-fix. Exact action depends on PR
+  #21's state at the time: close without merging (if still open) or open a
+  re-enable PR (if it merged ahead).
 - **Decide on the multi-camera redesign** — per
   `[[project_sea_surface_layer_one_camera_design]]`, the 4-instance pattern
   may eventually be replaced by a single layer that ingests N streams. If
