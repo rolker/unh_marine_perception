@@ -10,6 +10,8 @@
 #include "nav2_costmap_2d/layered_costmap.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
+#include "segments_apply.hpp"
+
 namespace sea_surface_layer
 {
 
@@ -61,11 +63,15 @@ public:
   void reset() override
   {
     std::lock_guard<std::mutex> lock(costmap_mutex_);
-    // Skip when matchSize() has not yet run: count_x_-1 would underflow.
+    // Skip when matchSize() has not yet run: resetMapToValue would still touch
+    // cell (0,0) if count_x_/count_y_ aren't both zero, but the resizeMap call
+    // in matchSize() runs first under normal lifecycle and the guard makes the
+    // invariant explicit.
     if (count_x_ == 0 || count_y_ == 0) {
       return;
     }
-    segments_costmap_.resetMapToValue(0, 0, count_x_-1, count_y_-1, nav2_costmap_2d::NO_INFORMATION);
+    // resetMapToValue uses exclusive (xn, yn) — matches nav2's [min, max) convention.
+    segments_costmap_.resetMapToValue(0, 0, count_x_, count_y_, nav2_costmap_2d::NO_INFORMATION);
   }
 
   bool isClearable() override { return false; }
@@ -100,20 +106,7 @@ public:
     int min_i, int min_j, int max_i, int max_j)  override
   {
     std::lock_guard<std::mutex> lock(costmap_mutex_);
-    for(int i = min_i; i <= max_i; ++i)
-    {
-      for(int j = min_j; j <= max_j; ++j)
-      {
-        unsigned char cost = segments_costmap_.getCost(i, j);
-        if(cost != nav2_costmap_2d::NO_INFORMATION)
-        {
-          if(cost > master_grid.getCost(i, j))
-          {
-            master_grid.setCost(i, j, cost);
-          }
-        }
-      }
-    }
+    apply_segments_to_master(segments_costmap_, master_grid, min_i, min_j, max_i, max_j);
   }
 
   void matchSize() override
@@ -158,11 +151,12 @@ private:
 
         // Defensive guard: matchSize() runs before subscribers are created,
         // but keep the invariant local so future reorderings can't reintroduce
-        // the count_x_-1 underflow.
+        // a zero-size access.
         if (count_x_ == 0 || count_y_ == 0) {
           return;
         }
-        segments_costmap_.resetMapToValue(0, 0, count_x_-1, count_y_-1, nav2_costmap_2d::NO_INFORMATION);
+        // resetMapToValue uses exclusive (xn, yn) — matches nav2's [min, max) convention.
+        segments_costmap_.resetMapToValue(0, 0, count_x_, count_y_, nav2_costmap_2d::NO_INFORMATION);
 
         for(unsigned int i = 0; i < count_x_; i++)
         {
