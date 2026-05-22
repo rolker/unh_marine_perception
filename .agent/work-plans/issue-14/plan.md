@@ -72,15 +72,23 @@ exclusive (`for (y = y0; y < yn; …)` internally), so the right arguments are
    `Costmap2D&` references — no `Layer` base, no `LayeredCostmap`, no TF —
    so it's directly unit-testable.
 4. **Add gtest cases** in `test/test_segments_apply.cpp`:
-   - **`HalfOpenBoundsRespected`** — call with `max_i < size_x` and verify
-     the row at `max_i` is untouched. Pre-fix `<=` fails this; post-fix
-     passes.
-   - **`GridEdgeBoundsDoesNotCrash`** — call with `max_i == size_x,
-     max_j == size_y`. Pre-fix would read past the buffer end (the
-     SIGSEGV from gabby's gdb trace). Post-fix completes cleanly.
-   - **`NoInformationCellsSkipped`** and **`MasterMaxKept`** — confirm the
-     `NO_INFORMATION` skip and the `cost > master.getCost(i, j)` max-keep
-     semantics are preserved across the refactor.
+   - **`HalfOpenBoundsRespectedAtOrigin`** — call with `max_i < size_x`
+     from `min_i=0` and verify the row at `max_i` is untouched. Pre-fix
+     `<=` would set those cells, failing the assertion → load-bearing
+     deterministic regression catch for #14.
+   - **`HalfOpenBoundsRespectedOffOrigin`** — same invariant with a
+     non-zero `min_i`, `min_j` (added per review-code feedback to lock
+     down indexing tied to offsets that an origin-anchored test would
+     miss).
+   - **`GridEdgeBoundsCompletes`** — smoke test for the field-crash
+     code path (`max_i == size_x, max_j == size_y`). On a small heap
+     buffer this can pass under the pre-fix `<=` (OOB read often lands
+     in mapped memory), so it documents the field scenario rather
+     than serving as the deterministic catch — `HalfOpenBoundsRespected*`
+     are the load-bearing catches.
+   - **`NoInformationCellsSkipped`** and **`MasterMaxKept`** — confirm
+     the `NO_INFORMATION` skip and the `cost > master.getCost(i, j)`
+     max-keep semantics are preserved across the refactor.
 5. **Verification** — locally: `colcon test --packages-select
    sea_surface_segmentation` passes the new tests. In the field on gabby:
    re-cycle the nav launch 5+ times with the 4-layer config that crashed
@@ -92,7 +100,7 @@ exclusive (`for (y = y0; y < yn; …)` internally), so the right arguments are
 |------|--------|
 | `sea_surface_segmentation/src/segments_apply.hpp` (new) | Header-only free function `apply_segments_to_master(segments, master, min_i, min_j, max_i, max_j)` with half-open loop bounds (`<`, not `<=`). |
 | `sea_surface_segmentation/src/sea_surface_layer.cpp` | `updateCosts` calls the new free function; `count_x_-1` → `count_x_`, `count_y_-1` → `count_y_` in `reset()` and `segmentsCallback`'s `resetMapToValue` (2 sites). |
-| `sea_surface_segmentation/test/test_segments_apply.cpp` (new) | Four gtest cases covering half-open bounds, grid-edge non-crash, NO_INFORMATION skip, max-keep semantics. |
+| `sea_surface_segmentation/test/test_segments_apply.cpp` (new) | Five gtest cases: half-open bounds at origin + off-origin (the deterministic regression catches), grid-edge smoke, NO_INFORMATION skip, max-keep semantics. |
 | `sea_surface_segmentation/CMakeLists.txt` | Register the new test target (mirroring the `test_frame_id_resolver` pattern). |
 
 ## Principles Self-Check
@@ -100,7 +108,7 @@ exclusive (`for (y = y0; y < yn; …)` internally), so the right arguments are
 | Principle | Consideration |
 |---|---|
 | A change includes its consequences | Pure-function extraction + unit tests land with the fix. Field re-cycle on gabby is documented in the PR body as the in-context verification. |
-| Test what breaks | `HalfOpenBoundsRespected` and `GridEdgeBoundsDoesNotCrash` directly target the failure mode that produced the field SIGSEGV. `NoInformationCellsSkipped`/`MasterMaxKept` pin the refactor's behavioral equivalence. |
+| Test what breaks | `HalfOpenBoundsRespectedAtOrigin` (and the off-origin variant) deterministically fail under the pre-fix `<=` loop. `GridEdgeBoundsCompletes` documents the field scenario but isn't load-bearing on small buffers. `NoInformationCellsSkipped`/`MasterMaxKept` pin the refactor's behavioral equivalence. |
 | Only what's needed | No threading-hygiene rework (umbrella #10 items E/F) — the gdb trace is in the `mapUpdateLoop` thread, not a subscription callback. The race hypotheses in #10 are not the cause. |
 | Improve incrementally | Minimum-viable patch for the crash. Leaves the `count_x_ == 0` zero-guards in place. |
 
