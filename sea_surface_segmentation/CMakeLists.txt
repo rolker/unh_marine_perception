@@ -94,6 +94,16 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
+
+  # Bag fixture for the launch_testing integration. Installed under
+  # share/ so the test (which uses get_package_share_directory) can
+  # find it both in-source and after install.
+  install(
+    DIRECTORY test/fixtures
+    DESTINATION share/${PROJECT_NAME}/test
+  )
+
   ament_add_gtest(test_frame_id_resolver test/test_frame_id_resolver.cpp)
   # Resolver header is private to the executable (lives next to its
   # .cpp in src/), so the test target needs its own path into src/.
@@ -124,6 +134,14 @@ if(BUILD_TESTING)
   target_link_libraries(test_segments_projection
     image_geometry::image_geometry
     ${sensor_msgs_TARGETS}
+  )
+
+  # launch_testing integration: replay a 20s slice of the 2026-05-22
+  # deployment bag through segments_to_pointcloud in reflex-mode and
+  # assert obstacle points land in the forward danger sector. This
+  # is the deployment-evidence regression for #17.
+  add_launch_test(test/test_segments_to_pointcloud_bag.py
+    TIMEOUT 60
   )
 endif()
 
