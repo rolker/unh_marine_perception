@@ -157,9 +157,9 @@ regressions:
 | `sea_surface_segmentation/CMakeLists.txt` | Add new test targets reaching into `src/` for the private header (mirrors how `test_frame_id_resolver` is set up). Follow existing `target_link_libraries` + `ament_target_dependencies` pattern (pre-existing mix; not converting in this PR) |
 | `sea_surface_segmentation/test/test_segments_projection.cpp` | **new** — unit tests for the projection helper |
 | `sea_surface_segmentation/test/test_segments_to_pointcloud_bag.py` | **new** — launch_testing bag-replay integration test |
-| `sea_surface_segmentation/test/fixtures/issue17_obstacle_approach.mcap` | **new** — trimmed slice from 2026-05-22 deployment bag |
+| `sea_surface_segmentation/test/fixtures/issue17_obstacle_approach/` | **new** — trimmed slice from 2026-05-22 deployment bag (directory with `*_0.mcap` + `metadata.yaml`; ros2 bag needs both). Installed under `share/` so the test can resolve it via `get_package_share_directory`. |
 | `sea_surface_segmentation/config/README.md` | Document `target_frame`, `projection_plane_z`, reflex-mode use |
-| `sea_surface_segmentation/package.xml` | Add any new test deps (ros2_bag, launch_testing) |
+| `sea_surface_segmentation/package.xml` | Add test_depend entries: `launch_testing_ament_cmake`, `launch_testing`, `launch_testing_ros`, `ros2bag`, `rosbag2_storage_mcap`, `sensor_msgs_py` |
 
 ## Principles Self-Check
 
