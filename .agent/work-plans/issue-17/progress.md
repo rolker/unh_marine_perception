@@ -170,8 +170,8 @@ include removal correct; tests pass for the right reasons. 32/32 tests pass.
 **CI**: all-pass (only the Copilot reviewer bot runs on this repo's PRs — no functional build/test CI; the 32-test suite runs locally only)
 
 ### Findings
-- [ ] (valid, Copilot ×2: inline + suppressed) Node directly includes `diagnostic_msgs/msg/diagnostic_status.hpp` / uses `DiagnosticStatus`, but manifest declares only `diagnostic_updater`; builds via transitive dep only. Add `<depend>diagnostic_msgs</depend>` + `find_package(diagnostic_msgs REQUIRED)` + link `${diagnostic_msgs_TARGETS}` — `package.xml:14`, `CMakeLists.txt:27`
-- [ ] (decision-to-surface) Same gap pre-exists for `rclcpp_lifecycle`, `lifecycle_msgs`, `tf2_ros` (all directly included, none in package.xml; plan flagged rclcpp_lifecycle as pre-existing). Bundle all four into the manifest fix, or keep minimal (diagnostic_msgs only) — user's call.
+- [x] (valid, Copilot ×2: inline + suppressed) Node directly includes `diagnostic_msgs/msg/diagnostic_status.hpp` / uses `DiagnosticStatus`, but manifest declares only `diagnostic_updater`; builds via transitive dep only. → fixed `b2f82f5`
+- [x] (decision-to-surface) Same gap pre-exists for `rclcpp_lifecycle`, `lifecycle_msgs`, `tf2_ros`. **User chose: bundle all four.** All declared in package.xml + find_package + linked in `b2f82f5`; build + 32 tests unchanged.
 
 ### False positives
 - (none)
