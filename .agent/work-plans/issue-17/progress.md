@@ -20,3 +20,18 @@ issue: 17
 - [ ] Default the reflex output frame to `bizzy/base_link_level`; rely on mru_transform (verified present in bizzy core launch) rather than subscribing to IMU; skip heave compensation.
 - [ ] Coordinate the output topic name + `frame_id` handshake with `rolker/unh_echoboats_project11#170` once the plan is drafted.
 - [ ] Consider an ADR in this repo capturing the reflex-safety-vs-costmap architecture choice (failure-stage independence) — non-obvious decision worth durable record.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-05-25 22:50 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+
+**Plan**: `.agent/work-plans/issue-17/plan.md` at `0365a21`
+**PR**: https://github.com/rolker/unh_marine_perception/pull/18 (`[PLAN]` prefix)
+**Phases**: single
+
+### Open questions
+- [ ] Bag-fixture size budget — trimmed mcap slice must fit ≪ 50 MB; fall back to LFS or external test-data dir if it doesn't.
+- [ ] Hull-floor → waterline offset — default `projection_plane_z=0.0` is a safety-polygon-scale approximation; #170 decides whether to set the param or add a `waterline_level` frame.
+- [ ] File the rung-1 follow-up issue ("Coarse mask-fills-danger-region trigger") before this PR merges so the deferral is tracked.
+- [ ] Confirm topic-name collision is solved by standard ROS remap in the boat launch (no node change needed).
