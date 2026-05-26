@@ -37,6 +37,21 @@ the second instance and wire it into `nav2_collision_monitor`.
    relying on launch-file remap discipline. This intentionally breaks
    the current default-topic convention; downstream consumers are
    covered by step 8.
+
+   **Output contract** (load-bearing for the reflex-safety claim):
+   when `target_frame` is non-empty, the published cloud is stamped
+   with `header.frame_id = target_frame` and `header.stamp =
+   segments_msg->header.stamp`. The TF lookup uses the same segments
+   stamp; Collision Monitor's `transform_tolerance` covers the small
+   age between segments and current TF.
+
+   **Launch surface**: update `segments_to_pointcloud_launch.py` to
+   accept `name` and `target_frame` as launch arguments (defaults:
+   `segments_to_pointcloud`, empty). The reflex-mode instance is
+   launched in #170 by passing `name='segments_to_pointcloud_reflex'`,
+   `target_frame='bizzy/base_link_level'`. Without these args, current
+   includers (izzy's `oak1_launch.py`) keep the legacy single-instance
+   behavior.
 2. **Extract the projection math into a pure-logic header**
    (`include/sea_surface_segmentation/segments_projection.hpp`):
    `project_obstacle_pixels(image, camera_model, cam_to_target, plane_z) →
@@ -59,12 +74,15 @@ the second instance and wire it into `nav2_collision_monitor`.
 5. **Add a launch_testing integration test** in
    `test/test_segments_to_pointcloud_bag.py` that replays a small
    pre-extracted slice of `~/data/logs/bizzy_images/bag_2026-05-22T20.00.02_ffmpeg_seg`
-   (segmentation Image + camera_info + TF) against an instance
-   configured with `target_frame=bizzy/base_link_level` and asserts the
-   resulting `segmentation/pointcloud` contains ≥N points in the forward
-   danger sector (`x ∈ [0, 10] m`, `|y| ≤ 3 m`) during the obstacle
-   approach window. The slice is checked into `test/fixtures/` as a
-   trimmed mcap (≪ 50 MB target — trim ruthlessly).
+   against an instance configured with `target_frame=bizzy/base_link_level`
+   and asserts the resulting `~/pointcloud` contains ≥N points in the
+   forward danger sector (`x ∈ [0, 10] m`, `|y| ≤ 3 m`) during the
+   obstacle approach window. The slice is checked into `test/fixtures/`
+   as a trimmed mcap (≪ 50 MB target — trim ruthlessly). Trim with
+   `mcap filter --include-topic …` keeping exactly four streams: the
+   segmentation `Image`, its `CameraInfo`, `/tf`, and `/tf_static`. The
+   N-point threshold is a **presence check, not a recall measurement**
+   — recall characterization is out of scope for this PR.
 6. **Verify the obstacle-pixel heuristic** against the bag. Current
    code uses `R-dominant` (rgb8 channel 0 > channels 1 and 2). The
    integration test will catch a mismatch deterministically; only widen
@@ -94,6 +112,13 @@ the second instance and wire it into `nav2_collision_monitor`.
    time this PR is reviewable so coordinated merging can happen with a
    minimal regression window for izzy's costmap.
 
+   **Merge ordering**: keep this PR in draft until both follow-up PRs
+   are open and reviewable. Merge same-day, boat-config PRs first, then
+   this one — that ordering ensures izzy never has a publisher with no
+   subscriber (the reverse would leave izzy's costmap silently empty).
+   izzy's costmap subscribes via `seafloor_echoboat_project11/
+   echoboat_project11/config/nav2_params.yaml` lines 158 and 207.
+
 The coarse danger-region trigger (rung 1 of the issue's robustness
 ladder) is **not being filed as a follow-up issue at this point**.
 Decision: rung 2 in `base_link_level` should already survive moderate
@@ -102,13 +127,30 @@ mru_transform fault, and a hypothetical projection bug. We'll only file
 rung-1 if field testing of rung-2 surfaces a real gap. Documented here
 so the decision is durable.
 
+### Pre-existing non-fix items (out of scope for this PR)
+
+Logged so review-code / Copilot doesn't flag them as introduced
+regressions:
+
+- The node uses plain `rclcpp::Publisher`, not `rclcpp_lifecycle::LifecyclePublisher`.
+  `on_activate`/`on_deactivate` lifecycle transitions are currently
+  no-ops; publication happens regardless of activation state.
+- `package.xml` doesn't declare `<exec_depend>rclcpp_lifecycle</exec_depend>`
+  even though `CMakeLists.txt` links the library. Will add a `test_depend`
+  for any new test deps, but the lifecycle exec_depend gap is pre-existing.
+- `CMakeLists.txt` has a pre-existing mix of `target_link_libraries` and
+  `ament_target_dependencies` on the `segments_to_pointcloud` target. New
+  test executables follow the existing pattern; conversion to modern
+  CMake targets is a separate cleanup.
+
 ## Files to Change
 
 | File | Change |
 |------|--------|
 | `sea_surface_segmentation/src/segments_to_pointcloud.cpp` | Add `target_frame`, `projection_plane_z` params; switch publisher topic to `~/pointcloud`; delegate projection to new header; preserve `map_frame` behavior |
+| `sea_surface_segmentation/launch/segments_to_pointcloud_launch.py` | Surface `name` and `target_frame` launch args (defaults preserve legacy single-instance behavior) |
 | `sea_surface_segmentation/include/sea_surface_segmentation/segments_projection.hpp` | **new** — pure-logic projection helper |
-| `sea_surface_segmentation/CMakeLists.txt` | Add header install; add new test target |
+| `sea_surface_segmentation/CMakeLists.txt` | Add header install; add new test targets. Follow existing `target_link_libraries` + `ament_target_dependencies` pattern (pre-existing mix; not converting in this PR) |
 | `sea_surface_segmentation/test/test_segments_projection.cpp` | **new** — unit tests for the projection helper |
 | `sea_surface_segmentation/test/test_segments_to_pointcloud_bag.py` | **new** — launch_testing bag-replay integration test |
 | `sea_surface_segmentation/test/fixtures/issue17_obstacle_approach.mcap` | **new** — trimmed slice from 2026-05-22 deployment bag |
@@ -140,6 +182,7 @@ so the decision is durable.
 | `segments_to_pointcloud` parameter surface | `config/README.md` | Yes (step 7) |
 | `segments_to_pointcloud` parameter surface | Downstream `unh_echoboats_project11#170` (will use `target_frame: bizzy/base_link_level`) | Out of scope — handshake recorded in #170 |
 | `segments_to_pointcloud` publisher topic (`segmentation/pointcloud` → `~/pointcloud`) | `unh_echoboats_project11` (izzy rviz + monitor) and `seafloor_echoboat_project11` (nav2 params) | Out of scope — follow-up issues filed per Approach step 8 |
+| `segments_to_pointcloud_launch.py` surface | `unh_echoboats_project11/izzyboat_project11/launch/oak1_launch.py` (current includer; should keep working with the new defaults but verify) | Yes — quick verification noted in step 1 |
 | `sea_surface_segmentation/include/` contents | `CMakeLists.txt` (install rule) | Yes (step 2) |
 | Add new test executables | `CMakeLists.txt` + `package.xml` test deps | Yes |
 
