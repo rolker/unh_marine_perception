@@ -136,3 +136,25 @@ stats accounting). Build clean; flake8 F401 clear.
 
 ### Actions
 - [ ] File the two step-8 consumer-migration follow-ups (`unh_echoboats_project11` izzy rviz+monitor, `seafloor_echoboat_project11` nav2 params), then mark PR ready and honor merge ordering vs #170.
+
+## Local Review
+**Status**: complete
+**When**: 2026-05-26 10:18 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+**Verdict**: approved
+
+**Branch**: feature/issue-17 at `f636855`
+**Mode**: pre-push (re-review, scoped to new commits `b807533..HEAD`)
+**Depth**: Deep (reason: new safety-critical code — diagnostics + quaternion-helper replacing in-node tf2 conversion)
+**Must-fix**: 0 | **Suggestions**: 2 (both applied in `f636855`)
+
+Both adversarial passes (Claude fresh-context + Copilot cross-model) returned
+no must-fix. Verified: quaternion→matrix matches tf2::Matrix3x3 element-wise
+(Claude read tf2's setRotation: helper's 1/sqrt(norm) pre-normalize ≡ tf2's
+2/length2 form); diagnostics clock comparison is same-clock-guarded; updater
+create-once avoids period-param redeclare; non-finite guards complete; tf2
+include removal correct; tests pass for the right reasons. 32/32 tests pass.
+
+### Findings
+- [x] (suggestion) `camera_info_received` rendered 1/0 not true/false on /diagnostics — fixed `f636855`
+- [x] (suggestion) Header comment's "matches tf2" claim unqualified (degenerate→identity) — fixed `f636855`
