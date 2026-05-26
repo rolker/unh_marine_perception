@@ -11,6 +11,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(camera_info_manager REQUIRED)
 find_package(cv_bridge REQUIRED)
+find_package(diagnostic_updater REQUIRED)
 find_package(depthai CONFIG REQUIRED)
 find_package(depthai_bridge REQUIRED)
 find_package(depthai_marine REQUIRED)
@@ -52,6 +53,7 @@ target_link_libraries(segments_to_pointcloud
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
   tf2_ros::tf2_ros
+  ${diagnostic_updater_TARGETS}
   ${sensor_msgs_TARGETS}
 
 )
@@ -126,13 +128,17 @@ if(BUILD_TESTING)
   # segments_projection.hpp lives next to segments_to_pointcloud.cpp
   # in src/ for the same reason; pure-logic helper exercised via this
   # GTest. Links against image_geometry for PinholeCameraModel and
-  # uses sensor_msgs CameraInfo for the synthetic fixture.
+  # uses sensor_msgs CameraInfo for the synthetic fixture. tf2 is linked
+  # only to cross-check rotation_matrix_from_quaternion against
+  # tf2::Matrix3x3 (the production conversion this header replaced).
+  find_package(tf2 REQUIRED)
   ament_add_gtest(test_segments_projection test/test_segments_projection.cpp)
   target_include_directories(test_segments_projection PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
   target_link_libraries(test_segments_projection
     image_geometry::image_geometry
+    tf2::tf2
     ${sensor_msgs_TARGETS}
   )
 

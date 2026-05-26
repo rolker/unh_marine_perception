@@ -8,14 +8,19 @@
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
-#include "tf2/LinearMath/Matrix3x3.h"
-#include "tf2/LinearMath/Quaternion.h"
+
+#include "diagnostic_updater/diagnostic_updater.hpp"
+#include "diagnostic_msgs/msg/diagnostic_status.hpp"
 
 #include "cv_bridge/cv_bridge.hpp"
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
+
+#include <cstddef>
+#include <memory>
+#include <string>
 
 #include "segments_projection.hpp"
 
@@ -79,6 +84,21 @@ public:
       rclcpp::SensorDataQoS()
     );
 
+    // Health monitoring. The updater owns its own 1 Hz timer and publishes
+    // a DiagnosticArray on /diagnostics, where the operator-station
+    // annunciator picks it up — so a degraded reflex feed (no camera_info,
+    // TF lookups failing, every ray non-finite) is observable rather than
+    // just a silently empty cloud. Created once (guarded) so a
+    // configure→cleanup→configure cycle doesn't re-declare its `period`
+    // parameter.
+    if (!diagnostic_updater_) {
+      diagnostic_updater_ = std::make_unique<diagnostic_updater::Updater>(this);
+      diagnostic_updater_->setHardwareID(get_name());
+      diagnostic_updater_->add(
+        "obstacle projection feed",
+        std::bind(&SegmentsToPointCloud::produceDiagnostics, this, std::placeholders::_1));
+    }
+
     return LifecycleNode::on_configure(state);
   }
 
@@ -102,8 +122,17 @@ private:
   void segmentsCallback(const sensor_msgs::msg::Image::SharedPtr segments_msg)
   {
     if (!camera_model_) {
+      // No CameraInfo yet — the projection can't run. Surface it (throttled)
+      // so a never-arriving camera_info isn't an invisible dead feed; the
+      // /diagnostics task reports the same state for the annunciator.
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "no camera_info received yet; obstacle projection idle");
       return;
     }
+
+    ++frames_received_;
+    last_frame_time_ = now();
 
     // Output-contract pivot: when `target_frame` is non-empty, the
     // projection lookup and the output `header.frame_id` both use it
@@ -124,22 +153,22 @@ private:
         transform.transform.translation.y,
         transform.transform.translation.z);
 
-      const tf2::Quaternion q(
-        transform.transform.rotation.x,
-        transform.transform.rotation.y,
-        transform.transform.rotation.z,
-        transform.transform.rotation.w);
-      const tf2::Matrix3x3 m(q);
-      cv::Matx33d rotation;
-      for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-          rotation(i, j) = m[i][j];
-        }
-      }
+      // Quaternion → cam-to-target rotation. The helper normalizes the
+      // quaternion and matches tf2's matrix convention (cross-checked in
+      // the unit tests), so this is equivalent to the previous
+      // tf2::Matrix3x3 path with added robustness against a non-unit input.
+      const cv::Matx33d rotation =
+        sea_surface_segmentation::rotation_matrix_from_quaternion(
+          transform.transform.rotation.x,
+          transform.transform.rotation.y,
+          transform.transform.rotation.z,
+          transform.transform.rotation.w);
 
       const auto image = cv_bridge::toCvShare(segments_msg, "rgb8");
+      sea_surface_segmentation::ProjectionStats stats;
       const auto points = sea_surface_segmentation::project_obstacle_pixels(
-        image->image, *camera_model_, camera_origin, rotation, projection_plane_z_);
+        image->image, *camera_model_, camera_origin, rotation, projection_plane_z_, &stats);
+      nonfinite_dropped_ += stats.dropped_nonfinite;
 
       pcl::PointCloud<pcl::PointXYZI> cloud;
       cloud.reserve(points.size());
@@ -157,8 +186,16 @@ private:
       pointcloud_msg.header.frame_id = projection_frame;
       pointcloud_msg.header.stamp = segments_msg->header.stamp;
       pointcloud_publisher_->publish(pointcloud_msg);
+
+      ++clouds_published_;
+      last_publish_time_ = now();
     } catch (const std::exception & e) {
-      RCLCPP_WARN_STREAM(get_logger(), e.what());
+      ++tf_failures_;
+      last_tf_failure_time_ = now();
+      last_error_ = e.what();
+      RCLCPP_WARN_STREAM_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "projection failed (frame '" << projection_frame << "'): " << e.what());
     }
   }
 
@@ -169,6 +206,65 @@ private:
       camera_model_ = std::make_shared<image_geometry::PinholeCameraModel>();
     }
     camera_model_->fromCameraInfo(camera_info_);
+  }
+
+  // Reports feed health on /diagnostics. Runs from the updater's 1 Hz timer
+  // on the same single-threaded executor as the callbacks, so the counters
+  // it reads need no synchronization. Severity is intentionally conservative
+  // — WARN, never ERROR — so a transient TF gap or a not-yet-calibrated
+  // camera doesn't raise a hard alarm on the annunciator; escalation to
+  // ERROR (and any sustained-failure timing) is left to the operator-side
+  // annunciator thresholds.
+  void produceDiagnostics(diagnostic_updater::DiagnosticStatusWrapper & stat)
+  {
+    using diagnostic_msgs::msg::DiagnosticStatus;
+
+    const std::string projection_frame =
+      target_frame_.empty() ? map_frame_ : target_frame_;
+
+    stat.add("mode", target_frame_.empty() ? "legacy (map_frame)" : "reflex (target_frame)");
+    stat.add("projection_frame", projection_frame);
+    stat.add("projection_plane_z", projection_plane_z_);
+    stat.add("camera_info_received", static_cast<bool>(camera_model_));
+    stat.add("segmentation_frames_received", static_cast<int>(frames_received_));
+    stat.add("clouds_published", static_cast<int>(clouds_published_));
+    stat.add("tf_lookup_failures", static_cast<int>(tf_failures_));
+    stat.add("nonfinite_points_dropped", static_cast<int>(nonfinite_dropped_));
+
+    if (frames_received_ > 0) {
+      stat.add("seconds_since_last_frame", (now() - last_frame_time_).seconds());
+    }
+    if (clouds_published_ > 0) {
+      stat.add("seconds_since_last_publish", (now() - last_publish_time_).seconds());
+    }
+    if (tf_failures_ > 0) {
+      stat.add("last_error", last_error_);
+    }
+
+    if (!camera_model_) {
+      stat.summary(DiagnosticStatus::WARN, "waiting for camera_info");
+      return;
+    }
+    if (frames_received_ == 0) {
+      stat.summary(DiagnosticStatus::WARN, "no segmentation frames received yet");
+      return;
+    }
+    // Frames are arriving but the latest ones aren't producing a cloud: the
+    // TF lookup for the projection frame is failing, so the obstacle stream
+    // is currently dead. The short-circuit guards the cross-clock time
+    // comparison — last_*_time_ are only compared once both counters are
+    // non-zero, by which point both were stamped from the same node clock.
+    const bool projection_failing =
+      clouds_published_ == 0 ||
+      (tf_failures_ > 0 && last_tf_failure_time_ > last_publish_time_);
+    if (projection_failing) {
+      stat.summary(
+        DiagnosticStatus::WARN,
+        "segmentation arriving but projection failing; check TF for '" +
+        projection_frame + "'");
+      return;
+    }
+    stat.summary(DiagnosticStatus::OK, "projecting obstacles");
   }
 
 
@@ -185,6 +281,20 @@ private:
   std::string map_frame_;
   std::string target_frame_;
   double projection_plane_z_{0.0};
+
+  std::unique_ptr<diagnostic_updater::Updater> diagnostic_updater_;
+
+  // Health counters for /diagnostics. Read/written only from the
+  // single-threaded executor (callbacks + updater timer), so no
+  // synchronization is needed.
+  std::size_t frames_received_{0};
+  std::size_t clouds_published_{0};
+  std::size_t tf_failures_{0};
+  std::size_t nonfinite_dropped_{0};
+  rclcpp::Time last_frame_time_;
+  rclcpp::Time last_publish_time_;
+  rclcpp::Time last_tf_failure_time_;
+  std::string last_error_;
 };
 
 int main(int argc, char **argv)
