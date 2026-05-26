@@ -225,7 +225,7 @@ private:
     stat.add("mode", target_frame_.empty() ? "legacy (map_frame)" : "reflex (target_frame)");
     stat.add("projection_frame", projection_frame);
     stat.add("projection_plane_z", projection_plane_z_);
-    stat.add("camera_info_received", static_cast<bool>(camera_model_));
+    stat.add("camera_info_received", camera_model_ ? "true" : "false");
     stat.add("segmentation_frames_received", static_cast<int>(frames_received_));
     stat.add("clouds_published", static_cast<int>(clouds_published_));
     stat.add("tf_lookup_failures", static_cast<int>(tf_failures_));

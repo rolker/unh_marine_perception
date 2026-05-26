@@ -55,10 +55,12 @@ inline bool is_obstacle_pixel(const cv::Vec3b & pixel)
 // degrades to "no rotation" instead of propagating NaN into the cloud — the
 // node's TF-failure diagnostics surface the bad transform separately.
 //
-// The matrix convention matches `tf2::Matrix3x3(tf2::Quaternion(x,y,z,w))`
-// (cross-checked element-wise in test_segments_projection.cpp), so swapping
-// the node's tf2 conversion for this keeps the geometry identical while
-// keeping this header free of a tf2 dependency.
+// For a finite, non-zero quaternion the matrix matches
+// `tf2::Matrix3x3(tf2::Quaternion(x,y,z,w))` element-wise (cross-checked in
+// test_segments_projection.cpp); degenerate inputs return identity as noted
+// above. So swapping the node's tf2 conversion for this keeps the geometry
+// identical for valid transforms while keeping this header free of a tf2
+// dependency.
 inline cv::Matx33d rotation_matrix_from_quaternion(
   double x, double y, double z, double w)
 {
