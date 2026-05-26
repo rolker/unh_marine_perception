@@ -46,10 +46,10 @@ issue: 17
 **Verdict**: approve-with-suggestions
 
 ### Findings
-- [ ] (must-fix) File targeting — `sea_surface_segmentation/launch/segments_to_pointcloud_launch.py` not in change table; current launch hardcodes node name and doesn't surface params, blocking a parallel reflex-mode instance. Specify how the second instance is launched (`name` arg, `target_frame` injection).
-- [ ] (must-fix) ROS conventions — Frame stamping contract when `target_frame` is set is load-bearing but not explicit: output cloud must be stamped with the segments stamp in `target_frame`; rely on Collision Monitor's `transform_tolerance` for the small TF age. State this in the plan.
-- [ ] (suggestion) Consequences — Add merge-ordering guidance: keep this PR draft until both cross-repo follow-ups are ready; merge boat-config PRs same-day to minimize izzy costmap regression window. izzy subscribes via `nav2_params.yaml` lines 158/207.
-- [ ] (suggestion) ROS conventions — Acknowledge pre-existing non-fix items as out-of-scope: existing `Publisher<>` instead of `LifecyclePublisher`; missing `rclcpp_lifecycle` exec_depend in `package.xml` (linked in CMakeLists but not declared).
-- [ ] (suggestion) File targeting — Specify the bag-trim topics (`segmentation/Image`, `camera_info`, `/tf`, `/tf_static`) and tool (`mcap filter --include-topic …` or `ros2 bag filter`) to anchor the deliverable.
-- [ ] (suggestion) Issue alignment — Clarify the N-points-in-danger-sector threshold is a presence check, not recall measurement; recall characterization is out of scope.
-- [ ] (suggestion) File targeting — Note CMakeLists.txt has pre-existing mix of `target_link_libraries` + `ament_target_dependencies`; new deps should "follow existing pattern" or this is a separate cleanup.
+- [x] (must-fix) File targeting — Launch file added to change table + step 1; `name` + `target_frame` args specified (addressed in plan commit `fd98d47`).
+- [x] (must-fix) ROS conventions — Output contract section added to step 1: `header.frame_id = target_frame`, `header.stamp = segments stamp`, rely on Collision Monitor `transform_tolerance` (addressed in plan commit `fd98d47`).
+- [x] (suggestion) Consequences — Merge-ordering paragraph added to step 8: boat-config PRs first, then this PR; izzy nav2_params.yaml lines 158/207 cited (addressed in plan commit `fd98d47`).
+- [x] (suggestion) ROS conventions — "Pre-existing non-fix items" subsection added: plain `Publisher`, missing `rclcpp_lifecycle` exec_depend, CMakeLists `target_link_libraries`/`ament_target_dependencies` mix (addressed in plan commit `fd98d47`).
+- [x] (suggestion) File targeting — Step 5 specifies `mcap filter` recipe + four topics (`segmentation` Image, `CameraInfo`, `/tf`, `/tf_static`) (addressed in plan commit `fd98d47`).
+- [x] (suggestion) Issue alignment — Step 5 explicit: "N-point threshold is a presence check, not a recall measurement" (addressed in plan commit `fd98d47`).
+- [x] (suggestion) File targeting — CMakeLists row in change table notes "follow existing pattern (pre-existing mix; not converting in this PR)" (addressed in plan commit `fd98d47`).
