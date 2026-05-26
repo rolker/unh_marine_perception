@@ -53,3 +53,32 @@ issue: 17
 - [x] (suggestion) File targeting — Step 5 specifies `mcap filter` recipe + four topics (`segmentation` Image, `CameraInfo`, `/tf`, `/tf_static`) (addressed in plan commit `fd98d47`).
 - [x] (suggestion) Issue alignment — Step 5 explicit: "N-point threshold is a presence check, not a recall measurement" (addressed in plan commit `fd98d47`).
 - [x] (suggestion) File targeting — CMakeLists row in change table notes "follow existing pattern (pre-existing mix; not converting in this PR)" (addressed in plan commit `fd98d47`).
+
+## Implementation
+**Status**: code complete; `/review-code` pending before push-to-review
+**When**: 2026-05-26 00:57 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+
+**Commits on `feature/issue-17`** (7 atomic commits since plan-review):
+- `ff60582` — refactor: extract projection math into `segments_projection.hpp` (pure-logic helper in `src/`, mirroring `segments_apply.hpp` / `frame_id_resolver.hpp` pattern)
+- `509f3a2` — feat: `target_frame` + `projection_plane_z` params; publisher switched to `~/pointcloud`
+- `59c100d` — test: 11 GTests for the projection helper (mathematical cases + roll-honored)
+- `ebdcd11` — feat(launch): `name` + `target_frame` launch args; defaults preserve legacy single-instance behavior
+- `2a54671` — docs: `config/README.md` documents both operating modes
+- `bf5c383` — test: launch_testing bag-replay regression + 3.8 MiB fixture from 2026-05-22 deployment
+- `cc4b37d` — plan: align Files-to-Change with landed fixture layout (directory, not single .mcap)
+
+**Test status**: 27/27 pass (13 pre-existing + 11 new GTest + 1 launch_test + 2 post-shutdown).
+
+**Plan drifts captured inline during implementation**:
+- Header lives in `src/` not `include/sea_surface_segmentation/` (matches existing pattern; see plan step 2 + Files-to-Change).
+- Fixture is a directory (`*.mcap` + `metadata.yaml`), not a single file.
+- `package.xml` test_depends enumerated.
+
+**Diagnostic notes carried in commit messages** (worth surfacing for review-code):
+- QoS mismatch caught during launch-test diagnosis (publisher best-effort vs default reliable subscriber → silent zero-message drop). Test now uses `qos_profile_sensor_data` explicitly.
+- Launch test needs `use_sim_time=True` on the node + `--clock` on the bag player so the TF buffer accepts bag-era (May 2026) stamps instead of evicting them as stale relative to wall clock.
+
+### Actions
+- [ ] **`/review-code` pre-push** before merging or letting Copilot review. The skill catches static-analysis, governance, plan-drift, and adversarial findings while they're still cheap to fix locally — and matches the user's "internal review before Copilot" pattern.
+- [ ] After review-code findings are addressed, the PR can be marked ready-for-review. Boat-config follow-up issues (per plan step 8: `unh_echoboats_project11` izzy rviz + monitor, `seafloor_echoboat_project11` nav2 params) should be filed at that point so coordinated merging is possible.
