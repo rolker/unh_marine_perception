@@ -53,12 +53,16 @@ the second instance and wire it into `nav2_collision_monitor`.
    includers (izzy's `oak1_launch.py`) keep the legacy single-instance
    behavior.
 2. **Extract the projection math into a pure-logic header**
-   (`include/sea_surface_segmentation/segments_projection.hpp`):
-   `project_obstacle_pixels(image, camera_model, cam_to_target, plane_z) →
-   std::vector<cv::Point3f>`. Mirrors the pattern of `segments_apply.hpp`
-   and `frame_id_resolver.hpp`; makes the math GTest-able without ROS or
-   TF in the loop. The node becomes a thin shell that does the TF
-   lookup and message I/O.
+   (`src/segments_projection.hpp` — private to the executable,
+   matching the file-locality pattern of `segments_apply.hpp` and
+   `frame_id_resolver.hpp`, which also live in `src/`):
+   `project_obstacle_pixels(mask_rgb8, camera_model, camera_origin,
+   rotation_cam_to_target, plane_z) → std::vector<ProjectedPoint>`.
+   Pure logic — no ROS, no TF, no PCL. The node still does the TF
+   lookup (extracting translation + 3×3 rotation from the
+   `TransformStamped`) and PointCloud2 assembly; the helper owns the
+   geometry. `is_obstacle_pixel(cv::Vec3b)` is its own inline so
+   tests can pin the heuristic deterministically.
 3. **Add an optional `projection_plane_z` parameter** (`double`,
    default `0.0`). The bizzy URDF anchors `base_link` at the hull-floor
    center screw hole — not the waterline. The hull-floor-to-waterline
@@ -149,8 +153,8 @@ regressions:
 |------|--------|
 | `sea_surface_segmentation/src/segments_to_pointcloud.cpp` | Add `target_frame`, `projection_plane_z` params; switch publisher topic to `~/pointcloud`; delegate projection to new header; preserve `map_frame` behavior |
 | `sea_surface_segmentation/launch/segments_to_pointcloud_launch.py` | Surface `name` and `target_frame` launch args (defaults preserve legacy single-instance behavior) |
-| `sea_surface_segmentation/include/sea_surface_segmentation/segments_projection.hpp` | **new** — pure-logic projection helper |
-| `sea_surface_segmentation/CMakeLists.txt` | Add header install; add new test targets. Follow existing `target_link_libraries` + `ament_target_dependencies` pattern (pre-existing mix; not converting in this PR) |
+| `sea_surface_segmentation/src/segments_projection.hpp` | **new** — pure-logic projection helper (private to the executable, like the existing `segments_apply.hpp` and `frame_id_resolver.hpp`) |
+| `sea_surface_segmentation/CMakeLists.txt` | Add new test targets reaching into `src/` for the private header (mirrors how `test_frame_id_resolver` is set up). Follow existing `target_link_libraries` + `ament_target_dependencies` pattern (pre-existing mix; not converting in this PR) |
 | `sea_surface_segmentation/test/test_segments_projection.cpp` | **new** — unit tests for the projection helper |
 | `sea_surface_segmentation/test/test_segments_to_pointcloud_bag.py` | **new** — launch_testing bag-replay integration test |
 | `sea_surface_segmentation/test/fixtures/issue17_obstacle_approach.mcap` | **new** — trimmed slice from 2026-05-22 deployment bag |
@@ -183,7 +187,7 @@ regressions:
 | `segments_to_pointcloud` parameter surface | Downstream `unh_echoboats_project11#170` (will use `target_frame: bizzy/base_link_level`) | Out of scope — handshake recorded in #170 |
 | `segments_to_pointcloud` publisher topic (`segmentation/pointcloud` → `~/pointcloud`) | `unh_echoboats_project11` (izzy rviz + monitor) and `seafloor_echoboat_project11` (nav2 params) | Out of scope — follow-up issues filed per Approach step 8 |
 | `segments_to_pointcloud_launch.py` surface | `unh_echoboats_project11/izzyboat_project11/launch/oak1_launch.py` (current includer; should keep working with the new defaults but verify) | Yes — quick verification noted in step 1 |
-| `sea_surface_segmentation/include/` contents | `CMakeLists.txt` (install rule) | Yes (step 2) |
+| New header in `src/` | `CMakeLists.txt` — none (private header, no install rule needed, matching existing pattern) | Yes (step 2) |
 | Add new test executables | `CMakeLists.txt` + `package.xml` test deps | Yes |
 
 ## Open Questions

@@ -32,7 +32,26 @@ public:
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State &state)
   {
+    // Legacy parameter — projection plane is the z=0 plane of this
+    // frame. Default "map" preserves pre-refactor behavior. Used as
+    // the projection target when `target_frame` is empty.
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
+
+    // Optional override that lets a parallel instance project into a
+    // failure-stage-independent frame (e.g. `bizzy/base_link_level`
+    // for the nav2_collision_monitor reflex feed). When non-empty,
+    // both the TF lookup and the output `header.frame_id` use this
+    // frame instead of `map_frame`.
+    target_frame_ = declare_parameter<std::string>("target_frame", "");
+
+    // z-coordinate of the projection plane in whichever frame is
+    // used. 0.0 matches the historical map-frame ground-plane
+    // assumption and is the right starting point for base_link_level
+    // mode too — the hull-floor-vs-waterline offset is treated as
+    // part of the Collision Monitor polygon-sizing budget; this
+    // param exists for tuning if field data demands it.
+    projection_plane_z_ = declare_parameter<double>("projection_plane_z", 0.0);
+
     tf_buffer_ =
     std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ =
@@ -50,8 +69,13 @@ public:
       std::bind(&SegmentsToPointCloud::cameraInfoCallback, this, std::placeholders::_1)
     );
 
+    // Publisher uses the node's private namespace so two parallel
+    // instances (legacy map-frame + reflex base_link_level) under the
+    // same parent namespace auto-isolate by node name. Downstream
+    // consumers of the legacy topic name migrate in coordinated
+    // follow-up PRs.
     pointcloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-      "segmentation/pointcloud",
+      "~/pointcloud",
       rclcpp::SensorDataQoS()
     );
 
@@ -81,9 +105,18 @@ private:
       return;
     }
 
+    // Output-contract pivot: when `target_frame` is non-empty, the
+    // projection lookup and the output `header.frame_id` both use it
+    // instead of `map_frame`. Failure-stage independence depends on
+    // *both* being the same frame — Collision Monitor will retransform
+    // to its own working frame each cycle, and `transform_tolerance`
+    // covers the small TF age between segments and current TF.
+    const std::string & projection_frame =
+      target_frame_.empty() ? map_frame_ : target_frame_;
+
     try {
       const auto transform = tf_buffer_->lookupTransform(
-        map_frame_, segments_msg->header.frame_id, segments_msg->header.stamp,
+        projection_frame, segments_msg->header.frame_id, segments_msg->header.stamp,
         std::chrono::seconds(1));
 
       const cv::Vec3d camera_origin(
@@ -106,7 +139,7 @@ private:
 
       const auto image = cv_bridge::toCvShare(segments_msg, "rgb8");
       const auto points = sea_surface_segmentation::project_obstacle_pixels(
-        image->image, *camera_model_, camera_origin, rotation, /*plane_z=*/0.0);
+        image->image, *camera_model_, camera_origin, rotation, projection_plane_z_);
 
       pcl::PointCloud<pcl::PointXYZI> cloud;
       cloud.reserve(points.size());
@@ -121,7 +154,7 @@ private:
 
       sensor_msgs::msg::PointCloud2 pointcloud_msg;
       pcl::toROSMsg(cloud, pointcloud_msg);
-      pointcloud_msg.header.frame_id = map_frame_;
+      pointcloud_msg.header.frame_id = projection_frame;
       pointcloud_msg.header.stamp = segments_msg->header.stamp;
       pointcloud_publisher_->publish(pointcloud_msg);
     } catch (const std::exception & e) {
@@ -150,6 +183,8 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::string map_frame_;
+  std::string target_frame_;
+  double projection_plane_z_{0.0};
 };
 
 int main(int argc, char **argv)
