@@ -112,6 +112,19 @@ if(BUILD_TESTING)
   target_link_libraries(test_segments_apply
     nav2_costmap_2d::nav2_costmap_2d_core
   )
+
+  # segments_projection.hpp lives next to segments_to_pointcloud.cpp
+  # in src/ for the same reason; pure-logic helper exercised via this
+  # GTest. Links against image_geometry for PinholeCameraModel and
+  # uses sensor_msgs CameraInfo for the synthetic fixture.
+  ament_add_gtest(test_segments_projection test/test_segments_projection.cpp)
+  target_include_directories(test_segments_projection PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(test_segments_projection
+    image_geometry::image_geometry
+    ${sensor_msgs_TARGETS}
+  )
 endif()
 
 ament_package()

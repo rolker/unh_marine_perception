@@ -1,0 +1,305 @@
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <vector>
+
+#include <opencv2/core.hpp>
+
+#include "image_geometry/pinhole_camera_model.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
+
+#include "segments_projection.hpp"
+
+using sea_surface_segmentation::is_obstacle_pixel;
+using sea_surface_segmentation::project_obstacle_pixels;
+using sea_surface_segmentation::ProjectedPoint;
+
+namespace
+{
+
+// Build a simple distortion-free pinhole CameraInfo: 640x480, fx=fy=320
+// (≈ 90° horizontal FOV), principal point at the image center.
+sensor_msgs::msg::CameraInfo make_pinhole_info(
+  unsigned int width = 640, unsigned int height = 480,
+  double fx = 320.0, double fy = 320.0)
+{
+  sensor_msgs::msg::CameraInfo info;
+  info.width = width;
+  info.height = height;
+  info.distortion_model = "plumb_bob";
+  info.d.assign(5, 0.0);
+  info.k = {
+    fx, 0.0, static_cast<double>(width) / 2.0,
+    0.0, fy, static_cast<double>(height) / 2.0,
+    0.0, 0.0, 1.0};
+  info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+  info.p = {
+    fx, 0.0, static_cast<double>(width) / 2.0, 0.0,
+    0.0, fy, static_cast<double>(height) / 2.0, 0.0,
+    0.0, 0.0, 1.0, 0.0};
+  return info;
+}
+
+image_geometry::PinholeCameraModel make_camera_model()
+{
+  image_geometry::PinholeCameraModel m;
+  m.fromCameraInfo(make_pinhole_info());
+  return m;
+}
+
+// Rotation that maps the camera optical frame (z forward, x right,
+// y down) into a "nadir" target frame: target_z = -optical_z (down),
+// target_x = optical_x (right), target_y = -optical_y (i.e., world
+// +y is camera -y / up). Right-handed, det = +1.
+cv::Matx33d nadir_rotation()
+{
+  return cv::Matx33d(
+    1.0, 0.0, 0.0,
+    0.0, -1.0, 0.0,
+    0.0, 0.0, -1.0);
+}
+
+// Rotation pitching the optical frame down by `pitch_deg`, with no
+// roll or yaw. Maps optical_z (forward) to (cos θ, 0, -sin θ) in the
+// target frame (x forward, z up). Optical_x stays target_-y (camera
+// right = world right). Optical_y maps as the right-handed completion.
+cv::Matx33d pitched_rotation(double pitch_deg)
+{
+  const double c = std::cos(pitch_deg * M_PI / 180.0);
+  const double s = std::sin(pitch_deg * M_PI / 180.0);
+  // Columns are (optical_x_in_target, optical_y_in_target, optical_z_in_target).
+  // Optical_x = right → target_-y → (0, -1, 0).
+  // Optical_z = forward → pitched down → (c, 0, -s).
+  // Optical_y = down → cross(optical_z_in_t, optical_x_in_t) per right-hand =
+  //                  cross((c,0,-s),(0,-1,0)) = (0*0-(-s)*(-1), (-s)*0-c*0, c*(-1)-0*0) = (-s,0,-c).
+  return cv::Matx33d(
+    0.0, -s, c,
+    -1.0, 0.0, 0.0,
+    0.0, -c, -s);
+}
+
+// Build a single-pixel red dot at (col, row) on a black mask of the
+// given size. Black is non-obstacle under the R-dominant heuristic
+// (0 > 0 is false).
+cv::Mat make_red_dot_mask(int width, int height, int col, int row)
+{
+  cv::Mat mask(height, width, CV_8UC3, cv::Scalar(0, 0, 0));
+  mask.at<cv::Vec3b>(row, col) = cv::Vec3b(200, 50, 50);  // R-dominant
+  return mask;
+}
+
+constexpr double kRangeTolerance = 0.05;  // 5 cm — projection should be tight.
+constexpr double kLateralTolerance = 0.05;
+
+}  // namespace
+
+// is_obstacle_pixel: red-dominant in, neutral/green/blue out.
+TEST(IsObstaclePixel, RedDominantTrue)
+{
+  EXPECT_TRUE(is_obstacle_pixel(cv::Vec3b(200, 0, 0)));
+  EXPECT_TRUE(is_obstacle_pixel(cv::Vec3b(200, 50, 50)));
+}
+
+TEST(IsObstaclePixel, NonRedDominantFalse)
+{
+  EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(0, 0, 0)));         // black
+  EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(0, 200, 0)));       // pure green
+  EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(0, 0, 200)));       // pure blue
+  EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(200, 200, 200)));   // gray (ties don't dominate)
+  EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(200, 200, 0)));     // red-tied-with-green
+}
+
+// Center pixel under a nadir camera 1 m above the z=0 plane projects
+// to the target-frame origin.
+TEST(ProjectObstaclePixels, NadirCenterPixelHitsOrigin)
+{
+  const auto model = make_camera_model();
+  const cv::Mat mask = make_red_dot_mask(640, 480, 320, 240);
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  const auto rotation = nadir_rotation();
+
+  const auto points = project_obstacle_pixels(mask, model, camera_origin, rotation);
+
+  ASSERT_EQ(points.size(), 1u);
+  EXPECT_NEAR(points[0].x, 0.0, kLateralTolerance);
+  EXPECT_NEAR(points[0].y, 0.0, kLateralTolerance);
+  EXPECT_NEAR(points[0].z, 0.0, 1e-9);
+  EXPECT_EQ(points[0].intensity, 200);
+}
+
+// A pixel to the right of the principal point under a nadir camera
+// projects to a point in the camera's right direction. With our
+// nadir_rotation, optical_+x maps to target_+x, so the projected
+// point should be at +x in the target frame.
+TEST(ProjectObstaclePixels, NadirOffsetPixelOffsetsLaterally)
+{
+  const auto model = make_camera_model();
+  // 320 pixels right of center at fx=320 → 45° → x = h*tan(45°) = h.
+  const cv::Mat mask = make_red_dot_mask(640, 480, 640 - 1, 240);
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 2.0);
+  const auto rotation = nadir_rotation();
+
+  const auto points = project_obstacle_pixels(mask, model, camera_origin, rotation);
+
+  ASSERT_EQ(points.size(), 1u);
+  // 319.5 / 320 ≈ 0.998 — multiplied by height 2 m → ≈ 1.997 m.
+  EXPECT_NEAR(points[0].x, 2.0 * (319.5 / 320.0), kRangeTolerance);
+  EXPECT_NEAR(points[0].y, 0.0, kLateralTolerance);
+  EXPECT_NEAR(points[0].z, 0.0, 1e-9);
+}
+
+// A camera mounted at 1 m above the plane and pitched 30° down. The
+// principal-point pixel (image center) corresponds to optical +z,
+// which after the pitched rotation points (cos 30°, 0, -sin 30°) in
+// target. Camera origin at (0,0,1). Plane intersection at u =
+// (0 - 1) / -sin 30° = 2. Point = (cos 30° * 2, 0, 0) ≈ (1.732, 0, 0).
+TEST(ProjectObstaclePixels, PitchedCameraCenterPixelHitsExpectedRange)
+{
+  const auto model = make_camera_model();
+  const cv::Mat mask = make_red_dot_mask(640, 480, 320, 240);
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  const auto rotation = pitched_rotation(30.0);
+
+  const auto points = project_obstacle_pixels(mask, model, camera_origin, rotation);
+
+  ASSERT_EQ(points.size(), 1u);
+  EXPECT_NEAR(points[0].x, std::cos(M_PI / 6.0) / std::sin(M_PI / 6.0), kRangeTolerance);
+  EXPECT_NEAR(points[0].y, 0.0, kLateralTolerance);
+  EXPECT_NEAR(points[0].z, 0.0, 1e-9);
+}
+
+// With a pitched camera, a pixel BELOW the principal point (which is
+// in optical +y, i.e. "more down" in the image) should project to a
+// nearer point than the principal-point pixel does.
+TEST(ProjectObstaclePixels, PitchedCameraImageBottomIsCloser)
+{
+  const auto model = make_camera_model();
+  const cv::Mat mask_center = make_red_dot_mask(640, 480, 320, 240);
+  const cv::Mat mask_bottom = make_red_dot_mask(640, 480, 320, 380);  // 140 px below center
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  const auto rotation = pitched_rotation(30.0);
+
+  const auto center_points = project_obstacle_pixels(mask_center, model, camera_origin, rotation);
+  const auto bottom_points = project_obstacle_pixels(mask_bottom, model, camera_origin, rotation);
+
+  ASSERT_EQ(center_points.size(), 1u);
+  ASSERT_EQ(bottom_points.size(), 1u);
+
+  EXPECT_LT(bottom_points[0].x, center_points[0].x)
+    << "image-bottom pixel should project to a closer range than image-center for a "
+       "forward-pitched camera";
+  EXPECT_GT(bottom_points[0].x, 0.0)
+    << "image-bottom pixel should still project in front of the camera";
+}
+
+// Pixels whose back-projected rays go away from the plane (e.g., a
+// pixel ABOVE the principal point on a forward-pitched camera, when
+// the pitch is shallow enough that the upward ray never reaches z=0)
+// must be silently dropped — not produce spurious behind-camera
+// points.
+TEST(ProjectObstaclePixels, RaysAwayFromPlaneAreDropped)
+{
+  const auto model = make_camera_model();
+  // Pixel well ABOVE the principal point. At 5° pitch the principal-
+  // point ray is barely below horizontal; a pixel 100 px above center
+  // is well above horizontal in the target frame → ray goes up.
+  const cv::Mat mask = make_red_dot_mask(640, 480, 320, 140);
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  const auto rotation = pitched_rotation(5.0);
+
+  const auto points = project_obstacle_pixels(mask, model, camera_origin, rotation);
+
+  EXPECT_TRUE(points.empty())
+    << "ray pointing upward (away from plane below) must not produce a point";
+}
+
+// All non-obstacle pixels are silently dropped — no points produced.
+TEST(ProjectObstaclePixels, NonObstaclePixelsProduceNoOutput)
+{
+  const auto model = make_camera_model();
+
+  cv::Mat mask(480, 640, CV_8UC3, cv::Scalar(0, 200, 0));  // green everywhere
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  const auto rotation = nadir_rotation();
+
+  const auto points = project_obstacle_pixels(mask, model, camera_origin, rotation);
+  EXPECT_TRUE(points.empty());
+}
+
+// projection_plane_z relocates the intersection plane in the target
+// frame. With a nadir camera at z=1.5 and plane_z=0.5, the center
+// pixel still projects to the camera's projected ground-track origin
+// — but at z=0.5, not 0.0.
+TEST(ProjectObstaclePixels, PlaneZParameterRelocatesIntersection)
+{
+  const auto model = make_camera_model();
+  const cv::Mat mask = make_red_dot_mask(640, 480, 320, 240);
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.5);
+  const auto rotation = nadir_rotation();
+
+  const auto points = project_obstacle_pixels(
+    mask, model, camera_origin, rotation, /*plane_z=*/0.5);
+
+  ASSERT_EQ(points.size(), 1u);
+  EXPECT_NEAR(points[0].x, 0.0, kLateralTolerance);
+  EXPECT_NEAR(points[0].y, 0.0, kLateralTolerance);
+  EXPECT_NEAR(points[0].z, 0.5, 1e-9);
+}
+
+// Honest rotation-application test. The helper just applies whatever
+// `rotation_cam_to_target` the caller hands it — the "roll being
+// rotated out" property the reflex-safety pipeline relies on is owned
+// by `mru_transform`'s definition of `base_link_level` (heading-only,
+// roll+pitch zeroed), not by this header.
+//
+// What we *can* unit-test here: when a roll appears inside the
+// supplied rotation matrix, the projected point shifts laterally by
+// the predicted amount — i.e. the helper honors the rotation rather
+// than ignoring it.
+TEST(ProjectObstaclePixels, RotationHonoredEvenWhenItContainsRoll)
+{
+  const auto model = make_camera_model();
+
+  // Pixel 100 px below the principal point.
+  const cv::Mat mask = make_red_dot_mask(640, 480, 320, 340);
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+
+  // Reference: pure 30° pitch, no roll → pixel-below-center
+  // projects forward with zero lateral offset.
+  const auto unrolled = project_obstacle_pixels(
+    mask, model, camera_origin, pitched_rotation(30.0));
+  ASSERT_EQ(unrolled.size(), 1u);
+  EXPECT_NEAR(unrolled[0].y, 0.0, kLateralTolerance);
+  EXPECT_GT(unrolled[0].x, 0.0);
+
+  // Now compose a roll into the rotation by 15° about optical z
+  // BEFORE the pitch. This represents a target frame that does NOT
+  // factor roll out (i.e. would-be-`base_link` not
+  // `base_link_level`). The lateral offset should appear,
+  // demonstrating the helper applied the rotation.
+  const double cr = std::cos(15.0 * M_PI / 180.0);
+  const double sr = std::sin(15.0 * M_PI / 180.0);
+  const cv::Matx33d add_roll(
+    cr, -sr, 0.0,
+    sr, cr, 0.0,
+    0.0, 0.0, 1.0);
+  const cv::Matx33d rolled_rotation = pitched_rotation(30.0) * add_roll;
+
+  const auto rolled = project_obstacle_pixels(
+    mask, model, camera_origin, rolled_rotation);
+
+  ASSERT_EQ(rolled.size(), 1u);
+  EXPECT_NE(rolled[0].y, unrolled[0].y)
+    << "roll inside the rotation matrix must produce a different lateral offset";
+  // The reference case is the world we want at runtime: a
+  // heading-only target gives zero lateral offset for an
+  // image-centerline pixel. mru_transform's job is to make sure the
+  // rotation we feed this helper is the unrolled one.
+}
