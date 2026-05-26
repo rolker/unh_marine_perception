@@ -100,12 +100,39 @@ regression-safe). Both adversarial passes (Claude fresh-context + Copilot cross-
 converged on silent-failure handling and test confidence around the safety contract.
 
 ### Findings
-- [ ] (must-fix) Non-finite points reach the cloud — guard only catches `ray_target[2]==0.0` exact; degenerate CameraInfo (fx/fy=0/NaN) → NaN points → silently dead reflex feed — `src/segments_projection.hpp:97-107`
-- [ ] (must-fix) Silent permanent-empty feed when `camera_model_` never set; add throttled warn — `src/segments_to_pointcloud.cpp:104-106`
-- [ ] (suggestion) Bag test doesn't assert `header.frame_id == bizzy/base_link_level` (the PR's safety contract) — `test/test_segments_to_pointcloud_bag.py:158-174`
-- [ ] (suggestion) Unit tests only use hand-built matrices; production quaternion→tf2::Matrix3x3→cv::Matx33d path untested — `test/test_segments_projection.cpp:50-79`
-- [ ] (suggestion) Quaternion used without normalization before Matrix3x3 — `src/segments_to_pointcloud.cpp:127-133`
-- [ ] (suggestion) flake8 F401 unused imports `rclpy.node.Node`, `launch` — `test/test_segments_to_pointcloud_bag.py:29,34`
-- [ ] (suggestion) Near-horizon rays give huge u/range; fold epsilon into the finite guard — `src/segments_projection.hpp:99-104`
-- [ ] (consequence) Topic rename `segmentation/pointcloud → ~/pointcloud` silently breaks out-of-repo consumers; file the two step-8 follow-ups + honor merge ordering vs #170 before marking ready
-- [ ] (note) Plain `rclcpp::Publisher` on LifecycleNode publishes regardless of activation; subs not torn down — pre-existing, acknowledged in plan's non-fix list
+- [x] (must-fix) Non-finite points reach the cloud — guard only catches `ray_target[2]==0.0` exact; degenerate CameraInfo (fx/fy=0/NaN) → NaN points → silently dead reflex feed — `src/segments_projection.hpp:97-107` → fixed `674bfaa` (isfinite guards on ray/u/point; counted in stats)
+- [x] (must-fix) Silent permanent-empty feed when `camera_model_` never set; add throttled warn — `src/segments_to_pointcloud.cpp:104-106` → fixed `15c456a` (throttled WARN + /diagnostics task, see entry below)
+- [x] (suggestion) Bag test doesn't assert `header.frame_id == bizzy/base_link_level` (the PR's safety contract) — `test/test_segments_to_pointcloud_bag.py:158-174` → fixed `4661451`
+- [x] (suggestion) Unit tests only use hand-built matrices; production quaternion→tf2::Matrix3x3→cv::Matx33d path untested — `test/test_segments_projection.cpp:50-79` → fixed `4661451` (element-wise cross-check vs tf2::Matrix3x3)
+- [x] (suggestion) Quaternion used without normalization before Matrix3x3 — `src/segments_to_pointcloud.cpp:127-133` → fixed `674bfaa`/`15c456a` (normalize inside `rotation_matrix_from_quaternion`)
+- [x] (suggestion) flake8 F401 unused imports `rclpy.node.Node`, `launch` — `test/test_segments_to_pointcloud_bag.py:29,34` → fixed `4661451`
+- [x] (suggestion) Near-horizon rays give huge u/range; fold epsilon into the finite guard — `src/segments_projection.hpp:99-104` → addressed `674bfaa` (`!isfinite(u)` guard; huge-but-finite ranges fall outside the danger sector by design)
+- [ ] (consequence) Topic rename `segmentation/pointcloud → ~/pointcloud` silently breaks out-of-repo consumers; file the two step-8 follow-ups + honor merge ordering vs #170 before marking ready — still open
+- [ ] (note) Plain `rclcpp::Publisher` on LifecycleNode publishes regardless of activation; subs not torn down — pre-existing, acknowledged in plan's non-fix list — not addressed (out of scope)
+
+## Implementation
+**Status**: review fixes + diagnostics complete; tests green
+**When**: 2026-05-26 09:40 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+
+Addressed all 7 actionable Local Review findings (above) and added health
+monitoring at the user's request.
+
+**Commits on `feature/issue-17`**:
+- `674bfaa` — fix(projection): drop non-finite points; normalized quaternion helper; ProjectionStats
+- `15c456a` — feat(diagnostics): publish `obstacle projection feed` health on `/diagnostics`; adopt the quaternion helper (drops inline tf2::Matrix3x3 + tf2/LinearMath includes); throttled silent-failure WARNs; link `diagnostic_updater`
+- `4661451` — test+docs: quaternion↔tf2 cross-check, non-finite + stats, reflex `frame_id` assertion; document diagnostics; drop F401 imports
+
+**Diagnostics design**: `diagnostic_updater::Updater` (1 Hz auto-timer,
+matches `udp_bridge` LifecycleNode pattern), created once in `on_configure`.
+Single task reports mode / projection_frame / camera_info_received /
+frames+clouds counts / tf_failures / nonfinite_dropped / last-event ages.
+Levels WARN-only (no ERROR) so transient TF gaps / not-yet-calibrated camera
+don't hard-alarm; ERROR escalation left to annunciator thresholds.
+
+**Test status**: 32/32 pass (was 27; +5 GTests: quaternion↔tf2 match,
+normalization, degenerate quaternion, degenerate-CameraInfo non-finite drop,
+stats accounting). Build clean; flake8 F401 clear.
+
+### Actions
+- [ ] File the two step-8 consumer-migration follow-ups (`unh_echoboats_project11` izzy rviz+monitor, `seafloor_echoboat_project11` nav2 params), then mark PR ready and honor merge ordering vs #170.

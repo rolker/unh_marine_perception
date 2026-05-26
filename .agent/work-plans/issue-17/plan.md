@@ -147,6 +147,27 @@ regressions:
   test executables follow the existing pattern; conversion to modern
   CMake targets is a separate cleanup.
 
+### Post-review hardening (review-code, 2026-05-26)
+
+Added after the Deep `/review-code` pass + a user request for health
+monitoring. These extend the original scope; recorded here so the plan
+matches the branch.
+
+- **Robustness**: `project_obstacle_pixels` now drops non-finite rays/points
+  (a zero-focal-length CameraInfo otherwise pushes NaN into the cloud — a
+  silent corruption of a safety feed) and counts them.
+- **Quaternion conversion** moved into `rotation_matrix_from_quaternion`
+  (pure-math, normalized) in the header, replacing the node's inline
+  `tf2::Matrix3x3` copy. Geometry is unchanged (cross-checked element-wise
+  against tf2 in the unit tests); the conversion is now testable and the
+  node drops its `tf2/LinearMath` includes.
+- **Diagnostics**: the node publishes an `obstacle projection feed` task on
+  `/diagnostics` (`diagnostic_updater`, 1 Hz) so a degraded feed (no
+  camera_info, TF failing, all-non-finite) is observable on the
+  operator-station annunciator rather than just an empty cloud. WARN-only
+  by design; ERROR escalation left to annunciator thresholds. Plus throttled
+  WARN logs on the silent-failure paths.
+
 ## Files to Change
 
 | File | Change |
@@ -186,6 +207,7 @@ regressions:
 | `segments_to_pointcloud` parameter surface | `config/README.md` | Yes (step 7) |
 | `segments_to_pointcloud` parameter surface | Downstream `unh_echoboats_project11#170` (will use `target_frame: bizzy/base_link_level`) | Out of scope — handshake recorded in #170 |
 | `segments_to_pointcloud` publisher topic (`segmentation/pointcloud` → `~/pointcloud`) | `unh_echoboats_project11` (izzy rviz + monitor) and `seafloor_echoboat_project11` (nav2 params) | Out of scope — follow-up issues filed per Approach step 8 |
+| Node now publishes `/diagnostics` (post-review hardening) | `package.xml` + `CMakeLists.txt` `diagnostic_updater` dep; `config/README.md` health section | Yes |
 | `segments_to_pointcloud_launch.py` surface | `unh_echoboats_project11/izzyboat_project11/launch/oak1_launch.py` (current includer; should keep working with the new defaults but verify) | Yes — quick verification noted in step 1 |
 | New header in `src/` | `CMakeLists.txt` — none (private header, no install rule needed, matching existing pattern) | Yes (step 2) |
 | Add new test executables | `CMakeLists.txt` + `package.xml` test deps | Yes |
