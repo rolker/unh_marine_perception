@@ -80,5 +80,32 @@ issue: 17
 - Launch test needs `use_sim_time=True` on the node + `--clock` on the bag player so the TF buffer accepts bag-era (May 2026) stamps instead of evicting them as stale relative to wall clock.
 
 ### Actions
-- [ ] **`/review-code` pre-push** before merging or letting Copilot review. The skill catches static-analysis, governance, plan-drift, and adversarial findings while they're still cheap to fix locally — and matches the user's "internal review before Copilot" pattern.
+- [x] **`/review-code` pre-push** before merging or letting Copilot review. The skill catches static-analysis, governance, plan-drift, and adversarial findings while they're still cheap to fix locally — and matches the user's "internal review before Copilot" pattern. (Run 2026-05-26; see Local Review below.)
 - [ ] After review-code findings are addressed, the PR can be marked ready-for-review. Boat-config follow-up issues (per plan step 8: `unh_echoboats_project11` izzy rviz + monitor, `seafloor_echoboat_project11` nav2 params) should be filed at that point so coordinated merging is possible.
+
+## Local Review
+**Status**: complete
+**When**: 2026-05-26 09:06 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+**Verdict**: changes-requested
+
+**PR**: #18 at `b807533`
+**Mode**: post-PR
+**Depth**: Deep (reason: safety-critical reflex feed for nav2 Collision Monitor / emergency stop)
+**Must-fix**: 2 | **Suggestions**: 5
+
+Core projection math independently verified correct (ray-plane intersection equivalent to
+legacy at plane_z=0; quaternion→matrix row/col convention right; legacy map-frame mode
+regression-safe). Both adversarial passes (Claude fresh-context + Copilot cross-model)
+converged on silent-failure handling and test confidence around the safety contract.
+
+### Findings
+- [ ] (must-fix) Non-finite points reach the cloud — guard only catches `ray_target[2]==0.0` exact; degenerate CameraInfo (fx/fy=0/NaN) → NaN points → silently dead reflex feed — `src/segments_projection.hpp:97-107`
+- [ ] (must-fix) Silent permanent-empty feed when `camera_model_` never set; add throttled warn — `src/segments_to_pointcloud.cpp:104-106`
+- [ ] (suggestion) Bag test doesn't assert `header.frame_id == bizzy/base_link_level` (the PR's safety contract) — `test/test_segments_to_pointcloud_bag.py:158-174`
+- [ ] (suggestion) Unit tests only use hand-built matrices; production quaternion→tf2::Matrix3x3→cv::Matx33d path untested — `test/test_segments_projection.cpp:50-79`
+- [ ] (suggestion) Quaternion used without normalization before Matrix3x3 — `src/segments_to_pointcloud.cpp:127-133`
+- [ ] (suggestion) flake8 F401 unused imports `rclpy.node.Node`, `launch` — `test/test_segments_to_pointcloud_bag.py:29,34`
+- [ ] (suggestion) Near-horizon rays give huge u/range; fold epsilon into the finite guard — `src/segments_projection.hpp:99-104`
+- [ ] (consequence) Topic rename `segmentation/pointcloud → ~/pointcloud` silently breaks out-of-repo consumers; file the two step-8 follow-ups + honor merge ordering vs #170 before marking ready
+- [ ] (note) Plain `rclcpp::Publisher` on LifecycleNode publishes regardless of activation; subs not torn down — pre-existing, acknowledged in plan's non-fix list
