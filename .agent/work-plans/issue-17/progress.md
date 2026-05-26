@@ -158,3 +158,20 @@ include removal correct; tests pass for the right reasons. 32/32 tests pass.
 ### Findings
 - [x] (suggestion) `camera_info_received` rendered 1/0 not true/false on /diagnostics — fixed `f636855`
 - [x] (suggestion) Header comment's "matches tf2" claim unqualified (degenerate→identity) — fixed `f636855`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-05-26 10:41 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+
+**PR**: #18 at `e78dc29`
+**Sources**: 2 (Copilot R1 @ `e78dc29` — inline + suppressed low-confidence; CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (only the Copilot reviewer bot runs on this repo's PRs — no functional build/test CI; the 32-test suite runs locally only)
+
+### Findings
+- [ ] (valid, Copilot ×2: inline + suppressed) Node directly includes `diagnostic_msgs/msg/diagnostic_status.hpp` / uses `DiagnosticStatus`, but manifest declares only `diagnostic_updater`; builds via transitive dep only. Add `<depend>diagnostic_msgs</depend>` + `find_package(diagnostic_msgs REQUIRED)` + link `${diagnostic_msgs_TARGETS}` — `package.xml:14`, `CMakeLists.txt:27`
+- [ ] (decision-to-surface) Same gap pre-exists for `rclcpp_lifecycle`, `lifecycle_msgs`, `tf2_ros` (all directly included, none in package.xml; plan flagged rclcpp_lifecycle as pre-existing). Bundle all four into the manifest fix, or keep minimal (diagnostic_msgs only) — user's call.
+
+### False positives
+- (none)
