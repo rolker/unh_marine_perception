@@ -26,12 +26,10 @@ import pytest
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from lifecycle_msgs.msg import Transition
-from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 
-import launch
 import launch_testing
 import launch_testing.actions
 from launch import LaunchDescription
@@ -42,6 +40,12 @@ from launch_ros.actions import LifecycleTransition
 NAMESPACE = '/bizzy/sensors/cameras/oak_forward'
 NODE_NAME = 'segments_to_pointcloud'
 POINTCLOUD_TOPIC = f'{NAMESPACE}/{NODE_NAME}/pointcloud'
+
+# The reflex feed's load-bearing safety contract: the cloud must be stamped
+# in the failure-stage-independent (heading-only) frame, not map. A
+# frame/stamp regression would defeat the whole point of the adapter, so the
+# test asserts it explicitly rather than trusting the danger-sector hits.
+TARGET_FRAME = 'bizzy/base_link_level'
 
 # Forward arc, ~10 m × 6 m, anchored at base_link in base_link_level.
 DANGER_SECTOR_X_MIN = 0.0
@@ -81,7 +85,7 @@ def generate_test_description():
         namespace=NAMESPACE,
         parameters=[{
             'use_sim_time': True,
-            'target_frame': 'bizzy/base_link_level',
+            'target_frame': TARGET_FRAME,
         }],
         output='screen',
     )
@@ -121,10 +125,12 @@ class TestReflexCloudHasDangerSectorPoints(unittest.TestCase):
         danger_sector_hits = 0
         total_points = 0
         message_count = 0
+        frame_ids = set()
 
         def callback(msg: PointCloud2):
             nonlocal danger_sector_hits, total_points, message_count
             message_count += 1
+            frame_ids.add(msg.header.frame_id)
             for point in point_cloud2.read_points(
                     msg,
                     field_names=('x', 'y', 'z', 'intensity'),
@@ -161,6 +167,14 @@ class TestReflexCloudHasDangerSectorPoints(unittest.TestCase):
             f'{TEST_TIMEOUT_SECONDS}s; node may not have configured/activated '
             f'or topic remapping is wrong.'
         )
+        self.assertEqual(
+            frame_ids, {TARGET_FRAME},
+            f'reflex cloud must be stamped only in {TARGET_FRAME!r} (the '
+            f'failure-stage-independent frame that is the whole point of the '
+            f'adapter); got frame_ids={frame_ids}. A wrong/mixed frame_id '
+            f'means the output contract regressed even if danger-sector hits '
+            f'look fine.'
+        )
         self.assertGreaterEqual(
             danger_sector_hits, MIN_DANGER_SECTOR_HITS,
             f'expected at least {MIN_DANGER_SECTOR_HITS} obstacle points in '
@@ -169,7 +183,7 @@ class TestReflexCloudHasDangerSectorPoints(unittest.TestCase):
             f'({total_points} total points across {message_count} messages). '
             f'The bag has 100 frames × hundreds of obstacle pixels each; '
             f'if hits are low or zero, the projection path is broken — '
-            f'check TF availability for bizzy/base_link_level and the '
+            f'check TF availability for {TARGET_FRAME} and the '
             f'`use_sim_time` flag on the node and the bag player.'
         )
 

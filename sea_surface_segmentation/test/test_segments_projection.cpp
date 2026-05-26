@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -7,12 +8,16 @@
 
 #include "image_geometry/pinhole_camera_model.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
+#include "tf2/LinearMath/Matrix3x3.h"
+#include "tf2/LinearMath/Quaternion.h"
 
 #include "segments_projection.hpp"
 
 using sea_surface_segmentation::is_obstacle_pixel;
 using sea_surface_segmentation::project_obstacle_pixels;
 using sea_surface_segmentation::ProjectedPoint;
+using sea_surface_segmentation::ProjectionStats;
+using sea_surface_segmentation::rotation_matrix_from_quaternion;
 
 namespace
 {
@@ -302,4 +307,104 @@ TEST(ProjectObstaclePixels, RotationHonoredEvenWhenItContainsRoll)
   // heading-only target gives zero lateral offset for an
   // image-centerline pixel. mru_transform's job is to make sure the
   // rotation we feed this helper is the unrolled one.
+}
+
+// The node feeds the camera-to-target rotation through
+// rotation_matrix_from_quaternion (it replaced the in-node
+// tf2::Quaternion → tf2::Matrix3x3 → cv::Matx33d copy). This pins the
+// helper to tf2's matrix convention element-wise, so the production
+// conversion path can't drift (sign / transpose / element-order) without
+// this test failing — the high-risk math the unit tests above can't cover
+// because they hand-build their rotations.
+TEST(RotationFromQuaternion, MatchesTf2Matrix3x3)
+{
+  const std::vector<std::array<double, 4>> quats = {
+    {0.0, 0.0, 0.0, 1.0},                          // identity
+    {0.5, 0.5, 0.5, 0.5},                          // 120° about (1,1,1)
+    {0.0, 0.7071067811865476, 0.0, 0.7071067811865476},   // 90° about y
+    {0.18257, 0.36515, 0.54772, 0.73030},          // arbitrary, already ~unit
+    {-0.2, 0.4, -0.1, 0.88},                        // arbitrary, non-axis
+  };
+
+  for (const auto & q : quats) {
+    tf2::Quaternion tq(q[0], q[1], q[2], q[3]);
+    tq.normalize();
+    const tf2::Matrix3x3 expected(tq);
+    const cv::Matx33d actual = rotation_matrix_from_quaternion(q[0], q[1], q[2], q[3]);
+
+    for (int i = 0; i < 3; ++i) {
+      for (int j = 0; j < 3; ++j) {
+        EXPECT_NEAR(actual(i, j), expected[i][j], 1e-12)
+          << "mismatch at (" << i << ", " << j << ") for quaternion "
+          << q[0] << ", " << q[1] << ", " << q[2] << ", " << q[3];
+      }
+    }
+  }
+}
+
+// A non-unit quaternion (numeric drift from a TF producer) must yield the
+// same rotation as its normalized form, not a scaled/garbage matrix.
+TEST(RotationFromQuaternion, NormalizesNonUnitInput)
+{
+  const cv::Matx33d unit = rotation_matrix_from_quaternion(0.5, 0.5, 0.5, 0.5);
+  const cv::Matx33d scaled = rotation_matrix_from_quaternion(1.5, 1.5, 1.5, 1.5);
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      EXPECT_NEAR(unit(i, j), scaled(i, j), 1e-12);
+    }
+  }
+}
+
+// A zero-norm (or non-finite) quaternion can't define a rotation; the
+// helper returns identity rather than propagating NaN into the cloud.
+TEST(RotationFromQuaternion, DegenerateQuaternionReturnsIdentity)
+{
+  const cv::Matx33d r = rotation_matrix_from_quaternion(0.0, 0.0, 0.0, 0.0);
+  const cv::Matx33d eye = cv::Matx33d::eye();
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      EXPECT_NEAR(r(i, j), eye(i, j), 1e-12);
+    }
+  }
+}
+
+// A degenerate CameraInfo (zero focal length — an uncalibrated-camera
+// placeholder) makes projectPixelTo3dRay produce non-finite rays. The
+// helper must drop them (counted in stats), not push NaN points into the
+// cloud — the silent-corruption mode that matters for a safety feed.
+TEST(ProjectObstaclePixels, DegenerateCameraInfoDropsNonFinite)
+{
+  image_geometry::PinholeCameraModel model;
+  model.fromCameraInfo(make_pinhole_info(640, 480, /*fx=*/0.0, /*fy=*/0.0));
+  const cv::Mat mask = make_red_dot_mask(640, 480, 320, 240);
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  const auto rotation = nadir_rotation();
+
+  ProjectionStats stats;
+  const auto points = project_obstacle_pixels(
+    mask, model, camera_origin, rotation, /*plane_z=*/0.0, &stats);
+
+  EXPECT_TRUE(points.empty()) << "non-finite projections must not be emitted";
+  EXPECT_EQ(stats.projected, 0u);
+  EXPECT_EQ(stats.obstacle_pixels, 1u);
+  EXPECT_GE(stats.dropped_nonfinite, 1u);
+}
+
+// The optional stats out-param accounts for obstacle pixels seen and
+// points produced — the counters the node forwards to /diagnostics.
+TEST(ProjectObstaclePixels, StatsAccountForPixelsAndProjections)
+{
+  const auto model = make_camera_model();
+  const cv::Mat mask = make_red_dot_mask(640, 480, 320, 240);
+
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  ProjectionStats stats;
+  const auto points = project_obstacle_pixels(
+    mask, model, camera_origin, nadir_rotation(), /*plane_z=*/0.0, &stats);
+
+  ASSERT_EQ(points.size(), 1u);
+  EXPECT_EQ(stats.obstacle_pixels, 1u);
+  EXPECT_EQ(stats.projected, 1u);
+  EXPECT_EQ(stats.dropped_nonfinite, 0u);
 }

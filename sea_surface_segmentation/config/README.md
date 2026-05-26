@@ -40,6 +40,26 @@ namespace, so two parallel instances auto-isolate by node name).
   so projected ranges carry a small, bounded near-horizon bias that
   the Collision Monitor slowdown polygon absorbs.
 
+### Health monitoring
+
+The node publishes a `diagnostic_msgs/DiagnosticArray` on `/diagnostics`
+(task name `obstacle projection feed`), picked up by the operator-station
+annunciator. This makes a silently-degraded reflex feed visible instead of
+showing up only as an empty cloud. Reported fields include `mode`,
+`projection_frame`, `camera_info_received`, `segmentation_frames_received`,
+`clouds_published`, `tf_lookup_failures`, `nonfinite_points_dropped`, and
+the age of the last frame/publish.
+
+Status levels (intentionally conservative — `WARN`, never `ERROR`, so a
+transient TF gap or a not-yet-calibrated camera doesn't raise a hard alarm;
+escalation thresholds belong on the annunciator side):
+
+- `OK` — projecting obstacles (frames in, clouds out).
+- `WARN` — `waiting for camera_info`, `no segmentation frames received
+  yet`, or `segmentation arriving but projection failing` (the TF lookup
+  for the projection frame is failing, so the obstacle stream is currently
+  dead).
+
 ### Launch
 
 `launch/segments_to_pointcloud_launch.py` exposes two launch
