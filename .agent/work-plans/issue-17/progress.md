@@ -35,3 +35,21 @@ issue: 17
 - [x] Hull-floor → waterline offset — **Resolved**: ship `projection_plane_z` with default 0.0; #170 absorbs the bias via polygon sizing. Escalate only if field tuning demands.
 - [x] Rung-1 follow-up — **Resolved**: don't file now. Rung-2 in `base_link_level` should survive moderate extrinsic error; file rung-1 only if field testing surfaces a real gap.
 - [x] Output topic name — **Resolved**: switch publisher from hardcoded `segmentation/pointcloud` to `~/pointcloud` (private namespace). Accepted cross-repo follow-ups: `unh_echoboats_project11` (izzy rviz + monitor) and `seafloor_echoboat_project11` (nav2 params). File these when #17 is reviewable so coordinated merge is possible.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-05-25 23:44 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context)) (fresh-context sub-agent)
+
+**Plan**: `.agent/work-plans/issue-17/plan.md` at `a37bf6e`
+**PR**: https://github.com/rolker/unh_marine_perception/pull/18
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (must-fix) File targeting — `sea_surface_segmentation/launch/segments_to_pointcloud_launch.py` not in change table; current launch hardcodes node name and doesn't surface params, blocking a parallel reflex-mode instance. Specify how the second instance is launched (`name` arg, `target_frame` injection).
+- [ ] (must-fix) ROS conventions — Frame stamping contract when `target_frame` is set is load-bearing but not explicit: output cloud must be stamped with the segments stamp in `target_frame`; rely on Collision Monitor's `transform_tolerance` for the small TF age. State this in the plan.
+- [ ] (suggestion) Consequences — Add merge-ordering guidance: keep this PR draft until both cross-repo follow-ups are ready; merge boat-config PRs same-day to minimize izzy costmap regression window. izzy subscribes via `nav2_params.yaml` lines 158/207.
+- [ ] (suggestion) ROS conventions — Acknowledge pre-existing non-fix items as out-of-scope: existing `Publisher<>` instead of `LifecyclePublisher`; missing `rclcpp_lifecycle` exec_depend in `package.xml` (linked in CMakeLists but not declared).
+- [ ] (suggestion) File targeting — Specify the bag-trim topics (`segmentation/Image`, `camera_info`, `/tf`, `/tf_static`) and tool (`mcap filter --include-topic …` or `ros2 bag filter`) to anchor the deliverable.
+- [ ] (suggestion) Issue alignment — Clarify the N-points-in-danger-sector threshold is a presence check, not recall measurement; recall characterization is out of scope.
+- [ ] (suggestion) File targeting — Note CMakeLists.txt has pre-existing mix of `target_link_libraries` + `ament_target_dependencies`; new deps should "follow existing pattern" or this is a separate cleanup.
