@@ -31,6 +31,12 @@ the second instance and wire it into `nav2_collision_monitor`.
    sea_surface_layer / costmap launches keep working untouched. Treat
    this as an addition, not a rename — the cross-repo blast radius of a
    rename outweighs the cleanup benefit here.
+   **Also**: switch the publisher topic from the hardcoded
+   `segmentation/pointcloud` to `~/pointcloud` (private namespace,
+   scoped by node name) so two parallel instances auto-isolate without
+   relying on launch-file remap discipline. This intentionally breaks
+   the current default-topic convention; downstream consumers are
+   covered by step 8.
 2. **Extract the projection math into a pure-logic header**
    (`include/sea_surface_segmentation/segments_projection.hpp`):
    `project_obstacle_pixels(image, camera_model, cam_to_target, plane_z) →
@@ -71,17 +77,36 @@ the second instance and wire it into `nav2_collision_monitor`.
    better placed in the boat config repo where the reflex layer is
    actually wired up.
 
+8. **File the cross-repo consumer-update follow-ups.** Two repos have
+   consumers of the legacy `segmentation/pointcloud` topic name that
+   will need to migrate to the new `~/pointcloud` convention:
+   - `rolker/unh_echoboats_project11`: izzy's rviz config
+     (`izzyboat_project11/config/izzyboat.rviz`) and izzy's diagnostic
+     monitor (`izzyboat_project11/config/izzyboat.yaml`).
+   - `rolker/seafloor_echoboat_project11`: nav2 params
+     (`echoboat_project11/config/nav2_params.yaml`, two costmap layer
+     entries).
+
+   Bizzy doesn't currently run `segments_to_pointcloud` at all
+   (`bizzyboat_project11/launch/oak_cameras_launch.py` starts only the
+   segmenter executable), so the June 4 safety-reflex critical path is
+   unaffected by this migration. File the two follow-up issues at the
+   time this PR is reviewable so coordinated merging can happen with a
+   minimal regression window for izzy's costmap.
+
 The coarse danger-region trigger (rung 1 of the issue's robustness
-ladder) is **deferred to a follow-up issue**. Rung 2 (metric homography
-in a stabilized frame) is what this PR delivers; rung 1 is independent
-work that doesn't block the field-ready safety reflex. Filing the
-follow-up is in Open Questions.
+ladder) is **not being filed as a follow-up issue at this point**.
+Decision: rung 2 in `base_link_level` should already survive moderate
+extrinsic error; rung-1's redundancy buy is against camera-mount-error,
+mru_transform fault, and a hypothetical projection bug. We'll only file
+rung-1 if field testing of rung-2 surfaces a real gap. Documented here
+so the decision is durable.
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
-| `sea_surface_segmentation/src/segments_to_pointcloud.cpp` | Add `target_frame`, `projection_plane_z` params; delegate projection to new header; preserve `map_frame` behavior |
+| `sea_surface_segmentation/src/segments_to_pointcloud.cpp` | Add `target_frame`, `projection_plane_z` params; switch publisher topic to `~/pointcloud`; delegate projection to new header; preserve `map_frame` behavior |
 | `sea_surface_segmentation/include/sea_surface_segmentation/segments_projection.hpp` | **new** — pure-logic projection helper |
 | `sea_surface_segmentation/CMakeLists.txt` | Add header install; add new test target |
 | `sea_surface_segmentation/test/test_segments_projection.cpp` | **new** — unit tests for the projection helper |
@@ -114,15 +139,29 @@ follow-up is in Open Questions.
 |---|---|---|
 | `segments_to_pointcloud` parameter surface | `config/README.md` | Yes (step 7) |
 | `segments_to_pointcloud` parameter surface | Downstream `unh_echoboats_project11#170` (will use `target_frame: bizzy/base_link_level`) | Out of scope — handshake recorded in #170 |
+| `segments_to_pointcloud` publisher topic (`segmentation/pointcloud` → `~/pointcloud`) | `unh_echoboats_project11` (izzy rviz + monitor) and `seafloor_echoboat_project11` (nav2 params) | Out of scope — follow-up issues filed per Approach step 8 |
 | `sea_surface_segmentation/include/` contents | `CMakeLists.txt` (install rule) | Yes (step 2) |
 | Add new test executables | `CMakeLists.txt` + `package.xml` test deps | Yes |
 
 ## Open Questions
 
-- **Bag-fixture size budget.** Trimmed mcap slice needs to be small enough to check into the repo (target ≪ 50 MB). If the smallest viable obstacle-approach window exceeds the budget, switch to Git LFS or an external test-data dir. Decide during step 5.
-- **Hull-floor → waterline offset.** Default `projection_plane_z = 0.0` is fine for safety-polygon scales, but if Collision Monitor tuning in #170 wants the bias removed, we'll either set this param in the bizzy config or add a static `bizzy/waterline_level` frame. Decision lives in #170, not here.
-- **Coarse danger-region trigger follow-up issue.** Should be filed before this PR merges so the rung-1 deferral is tracked. Title sketch: "Coarse mask-fills-danger-region trigger for Collision Monitor (rung 1)" — file under `unh_marine_perception`.
-- **Output topic name.** Current code hardcodes `segmentation/pointcloud`. Two parallel instances will share the topic unless the reflex-mode launch in #170 uses ROS remap (the standard path). No node change needed — confirming.
+None remaining for this plan. The four open questions raised during
+plan drafting were resolved in discussion:
+
+- **Bag-fixture size budget.** Decision: check in to git under
+  `test/fixtures/`. Target ≪ 50 MB after trim. No LFS, no external
+  dir — keep CI / fresh clones self-sufficient.
+- **Hull-floor → waterline offset.** Decision: ship the
+  `projection_plane_z` param with default 0.0. Treat the bias as part
+  of #170's polygon-sizing budget. Escalate to a measured value or a
+  `waterline_level` static TF only if field tuning demands it.
+- **Rung-1 coarse trigger follow-up issue.** Decision: don't file
+  now. Rung-2 in `base_link_level` should survive moderate extrinsic
+  error; rung-1's redundancy buy is conditional. File it only if
+  field evidence shows rung-2 misses something rung-1 would catch.
+- **Output topic name.** Decision: switch publisher from
+  `segmentation/pointcloud` to `~/pointcloud` (private namespace).
+  Accept the coordinated cross-repo consumer update (Approach step 8).
 
 ## Estimated Scope
 

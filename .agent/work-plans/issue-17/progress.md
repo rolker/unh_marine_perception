@@ -31,7 +31,7 @@ issue: 17
 **Phases**: single
 
 ### Open questions
-- [ ] Bag-fixture size budget — trimmed mcap slice must fit ≪ 50 MB; fall back to LFS or external test-data dir if it doesn't.
-- [ ] Hull-floor → waterline offset — default `projection_plane_z=0.0` is a safety-polygon-scale approximation; #170 decides whether to set the param or add a `waterline_level` frame.
-- [ ] File the rung-1 follow-up issue ("Coarse mask-fills-danger-region trigger") before this PR merges so the deferral is tracked.
-- [ ] Confirm topic-name collision is solved by standard ROS remap in the boat launch (no node change needed).
+- [x] Bag-fixture size budget — **Resolved**: check in to git under `test/fixtures/`. No LFS, no external dir. Target ≪ 50 MB.
+- [x] Hull-floor → waterline offset — **Resolved**: ship `projection_plane_z` with default 0.0; #170 absorbs the bias via polygon sizing. Escalate only if field tuning demands.
+- [x] Rung-1 follow-up — **Resolved**: don't file now. Rung-2 in `base_link_level` should survive moderate extrinsic error; file rung-1 only if field testing surfaces a real gap.
+- [x] Output topic name — **Resolved**: switch publisher from hardcoded `segmentation/pointcloud` to `~/pointcloud` (private namespace). Accepted cross-repo follow-ups: `unh_echoboats_project11` (izzy rviz + monitor) and `seafloor_echoboat_project11` (nav2 params). File these when #17 is reviewable so coordinated merge is possible.
