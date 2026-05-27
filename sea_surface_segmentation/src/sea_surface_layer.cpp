@@ -11,6 +11,7 @@
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 #include "segments_apply.hpp"
+#include "segments_projection.hpp"
 
 namespace sea_surface_layer
 {
@@ -196,9 +197,19 @@ private:
               auto pixel_value = image->image.at<cv::Vec3b>(pixel);
               // Segmentation channel convention: dominant R marks non-water
               // (lethal obstacle); dominant G/B marks water (free space).
-              if(pixel_value[0] > pixel_value[1] && pixel_value[0] > pixel_value[2])
+              if(sea_surface_segmentation::is_obstacle_pixel(pixel_value))
               {
-                segments_costmap_.setCost(i, j, nav2_costmap_2d::LETHAL_OBSTACLE);
+                // Only the waterline contact is a trustworthy z=0 footprint. An
+                // obstacle's above-water body pixels back-project far beyond the
+                // real obstacle, smearing a false radial "shadow" of lethal
+                // cells out toward maximum_range. Mark only the contact lethal;
+                // leave the rest at NO_INFORMATION (occluded/unknown — the value
+                // reset at the start of this callback).
+                if(sea_surface_segmentation::is_waterline_contact_pixel(
+                     image->image, static_cast<int>(pixel.y), static_cast<int>(pixel.x)))
+                {
+                  segments_costmap_.setCost(i, j, nav2_costmap_2d::LETHAL_OBSTACLE);
+                }
               }
               else
               {

@@ -46,6 +46,33 @@ inline bool is_obstacle_pixel(const cv::Vec3b & pixel)
   return pixel[0] > pixel[1] && pixel[0] > pixel[2];
 }
 
+// True if an obstacle pixel is a "waterline contact" — the point where an
+// obstacle meets the water surface — rather than part of the obstacle's body
+// sticking up out of the water.
+//
+// An obstacle pixel is a contact iff the pixel directly below it is water
+// (non-obstacle), or it sits on the bottom image row (nothing below to
+// disqualify it — the nearest possible return for that bearing). Pixels with
+// more obstacle below them are the object's body.
+//
+// Why it matters: the costmap layer back-projects every obstacle pixel onto
+// the z=0 water plane. That assumption holds only at the waterline; an
+// above-water body pixel back-projects far beyond the real obstacle, smearing
+// a false radial "shadow" of lethal cells out toward maximum_range. Only the
+// contact is a trustworthy footprint; the region the body occludes should be
+// left unknown (NO_INFORMATION), not marked lethal. Callers use this to mark
+// the contact lethal and skip the rest.
+inline bool is_waterline_contact_pixel(const cv::Mat & mask, int row, int col)
+{
+  if (!is_obstacle_pixel(mask.at<cv::Vec3b>(row, col))) {
+    return false;
+  }
+  if (row + 1 >= mask.rows) {
+    return true;  // bottom image row: nearest possible return for this bearing
+  }
+  return !is_obstacle_pixel(mask.at<cv::Vec3b>(row + 1, col));
+}
+
 // Convert a quaternion (x, y, z, w) into the 3×3 rotation matrix that maps
 // a direction in the camera optical frame to the target frame — i.e. the
 // `rotation_cam_to_target` argument of `project_obstacle_pixels`. The input

@@ -14,6 +14,7 @@
 #include "segments_projection.hpp"
 
 using sea_surface_segmentation::is_obstacle_pixel;
+using sea_surface_segmentation::is_waterline_contact_pixel;
 using sea_surface_segmentation::project_obstacle_pixels;
 using sea_surface_segmentation::ProjectedPoint;
 using sea_surface_segmentation::ProjectionStats;
@@ -112,6 +113,48 @@ TEST(IsObstaclePixel, NonRedDominantFalse)
   EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(0, 0, 200)));       // pure blue
   EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(200, 200, 200)));   // gray (ties don't dominate)
   EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(200, 200, 0)));     // red-tied-with-green
+}
+
+// is_waterline_contact_pixel: only the lowest obstacle pixel in a column
+// (the one with water directly below) is the waterline contact; obstacle
+// pixels stacked above it are the object's body and must NOT count as
+// contacts (their cells become the false "shadow").
+TEST(WaterlineContactPixel, OnlyLowestObstaclePixelInColumnIsContact)
+{
+  // 8x8 mask, all water (green). Column 4 holds a 3-px-tall obstacle in
+  // rows 2,3,4 with water below it (rows 5..7).
+  cv::Mat mask(8, 8, CV_8UC3, cv::Scalar(0, 200, 0));  // BGR-agnostic: G-dominant = water
+  for (int row = 2; row <= 4; ++row) {
+    mask.at<cv::Vec3b>(row, 4) = cv::Vec3b(200, 0, 0);  // R-dominant = obstacle
+  }
+
+  EXPECT_TRUE(is_waterline_contact_pixel(mask, 4, 4))   // base: water (row 5) below
+    << "lowest obstacle pixel in the column is the waterline contact";
+  EXPECT_FALSE(is_waterline_contact_pixel(mask, 3, 4))  // obstacle below (row 4)
+    << "body pixel with obstacle below is not a contact";
+  EXPECT_FALSE(is_waterline_contact_pixel(mask, 2, 4))  // obstacle below (row 3)
+    << "top body pixel is not a contact";
+}
+
+TEST(WaterlineContactPixel, WaterPixelIsNeverContact)
+{
+  cv::Mat mask(8, 8, CV_8UC3, cv::Scalar(0, 200, 0));
+  EXPECT_FALSE(is_waterline_contact_pixel(mask, 3, 3));
+}
+
+TEST(WaterlineContactPixel, ObstacleOnBottomRowIsContact)
+{
+  // Nothing below the bottom row to disqualify it → nearest possible return.
+  cv::Mat mask(8, 8, CV_8UC3, cv::Scalar(0, 200, 0));
+  mask.at<cv::Vec3b>(7, 4) = cv::Vec3b(200, 0, 0);
+  EXPECT_TRUE(is_waterline_contact_pixel(mask, 7, 4));
+}
+
+TEST(WaterlineContactPixel, IsolatedObstaclePixelWithWaterBelowIsContact)
+{
+  cv::Mat mask(8, 8, CV_8UC3, cv::Scalar(0, 200, 0));
+  mask.at<cv::Vec3b>(3, 4) = cv::Vec3b(200, 0, 0);  // single px, water below
+  EXPECT_TRUE(is_waterline_contact_pixel(mask, 3, 4));
 }
 
 // Center pixel under a nadir camera 1 m above the z=0 plane projects
