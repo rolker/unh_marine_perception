@@ -45,3 +45,26 @@ log-odds chosen as the recommended decay model. fe337f6 (waterline patch) folds 
 - [ ] Decay/clearing model — log-odds (recommended) vs hit/miss+time-decay; confirm/veto at review-plan
 - [ ] Sequencing — perception capability PR first (back-compat), then seafloor config-migration PR to activate cross-camera fusion? (recommended yes)
 - [ ] Default tuning — decay half-life, hit/miss increments, lethal threshold (propose defaults, tune on water)
+
+## Plan Review
+**Status**: complete
+**When**: 2026-05-27 11:35 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context)) (same agent identity — performed via fresh-context sub-agent for independence)
+
+**Plan**: `.agent/work-plans/issue-19/plan.md` at `4179d4e`
+**PR**: https://github.com/rolker/unh_marine_perception/pull/20
+**Verdict**: changes-requested
+
+Architecture (single fused world-frame log-odds buffer, mark-at-waterline, temporal decay) is sound;
+ADR-0008 mechanism choices correct. Sub-agent verified global_costmap does NOT use the layer, so the
+migration is local_costmap-only (plan scope correct). Four must-fixes below.
+
+### Findings
+- [ ] (must-fix) Float log-odds buffer can't reuse nav2 `updateOrigin()` (built for uint8 cost cells); phase 1 must spec the float-array shift + prior-fill on exposed cells + a fractional-shift drift test — the load-bearing prerequisite — plan.md phase 1
+- [ ] (must-fix) `Closes #19` pairs with a single-source PR, but #19's signature handoff AC needs the multi-source shared buffer (activated only by the later seafloor config PR) → AC unverifiable in this PR; don't auto-close #19 or carry the handoff AC into the config PR — **surface to user** — plan.md Estimated Scope / Open Questions
+- [ ] (must-fix) "fixes #10 H" overstated: waterline-contact addresses shadow-smear, NOT the `map_tide` z=0 vertical-drift (orthogonal; contact still back-projects to fixed plane_z=0). Downgrade to "partially addresses H"; parameterize plane_z from tide frame or defer — plan.md phase 3
+- [ ] (must-fix) `project_obstacle_pixels` doesn't drop in (emits points for ALL obstacle pixels; no contact/water-miss/occlusion). Phase 3 needs a new helper (contact-only + free-space/miss raytrace camera→contact) and must confirm `segments_to_pointcloud.cpp` (other consumer) is unaffected — plan.md phase 3
+- [ ] (suggestion) 128×96 mask quantization → contact-range uncertainty is range-dependent; decay/threshold defaults must tolerate a contact jittering across cells at long range (else re-creates flicker) — plan.md phase 3/tuning
+- [ ] (suggestion) Phase-6 param callback: validate (reject NaN/negative/out-of-range, return successful=false), no re-lock — plan.md phase 6
+- [ ] (suggestion) State a per-phase invariant: each commit leaves the layer buildable AND single-source-correct — plan.md Approach
+- [ ] (suggestion) Reconsider `isClearable()` (hard-coded false today) under a decaying-occupancy model — plan.md phase 1/5
