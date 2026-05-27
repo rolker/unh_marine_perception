@@ -179,7 +179,15 @@ private:
 
   void segmentsCallback(const sensor_msgs::msg::Image::SharedPtr segments_msg)
   {
-    if (!camera_model_) {
+    // Pin the camera model under the lock, then project off-lock. cameraInfoCallback
+    // swaps in a *fresh* model (never mutates in place), so this local copy is an
+    // immutable snapshot — no torn read / use-after-free during projection.
+    std::shared_ptr<image_geometry::PinholeCameraModel> camera_model;
+    {
+      std::lock_guard<std::mutex> lock(costmap_mutex_);
+      camera_model = camera_model_;
+    }
+    if (!camera_model) {
       return;
     }
     try {
@@ -199,7 +207,7 @@ private:
       // Water surface is z=0 in the tide-tracked global frame; the boat floats,
       // so this holds at any tide (see #19 / #10 H discussion).
       const auto observations = sea_surface_segmentation::project_observations(
-        image->image, *camera_model_, camera_origin, rotation_cam_to_world, maximum_range_, 0.0);
+        image->image, *camera_model, camera_origin, rotation_cam_to_world, maximum_range_, 0.0);
 
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       if (!buffer_) {
@@ -220,12 +228,13 @@ private:
 
   void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr camera_info_msg)
   {
+    // Build a fresh model off-lock, then swap the pointer under the lock. Readers
+    // that already copied the old pointer keep using an unchanged object — no
+    // in-place mutation of a model a concurrent segmentsCallback may be reading.
+    auto model = std::make_shared<image_geometry::PinholeCameraModel>();
+    model->fromCameraInfo(*camera_info_msg);
     std::lock_guard<std::mutex> lock(costmap_mutex_);
-    camera_info_ = *camera_info_msg;
-    if (!camera_model_) {
-      camera_model_ = std::make_shared<image_geometry::PinholeCameraModel>();
-    }
-    camera_model_->fromCameraInfo(camera_info_);
+    camera_model_ = model;
   }
 
   std::string global_frame_id_;
@@ -245,7 +254,6 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr segments_subscriber_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscriber_;
 
-  sensor_msgs::msg::CameraInfo camera_info_;
   std::shared_ptr<image_geometry::PinholeCameraModel> camera_model_;
 
   std::mutex costmap_mutex_;
