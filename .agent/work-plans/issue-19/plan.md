@@ -33,7 +33,7 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
    of the float array keyed to the origin delta, filling newly-exposed border cells with the **prior**
    (log-odds 0); `resizeMap` only on a true size/resolution change. Fractional-meter shifts quantize to
    the cell grid — test that evidence survives a *sequence* of sub-cell origin shifts and lands in the
-   correct world cell, not just one clean cell-aligned shift. Load-bearing prerequisite. Fixes #10 D.
+   correct world cell, not just one clean cell-aligned shift. Load-bearing prerequisite. Addresses #10 D.
    (Also revisit `isClearable()` — hard-coded `false` today — now that the layer clears via decay.)
 2. **Pure log-odds occupancy buffer** — new header `occupancy_buffer.hpp` (mirrors the
    `segments_apply.hpp` / `segments_projection.hpp` pure-logic + unit-test pattern): per-cell log-odds,
@@ -45,7 +45,7 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
    (decays, never marked). This needs a **new** pure helper (contact-only projection + camera→contact
    free-space raytrace) — `project_obstacle_pixels` emits points for *all* obstacle pixels and is the
    wrong primitive; it stays unchanged for its other consumer `segments_to_pointcloud.cpp` (the reflex
-   feed), which must be confirmed unaffected. Folds in `fe337f6`; fixes #10 I. **Only _partially_
+   feed), which must be confirmed unaffected. Folds in `fe337f6`; addresses #10 I. **Only _partially_
    addresses #10 H**: marking at the waterline removes the tall-obstacle smear, but the contact still
    back-projects to a fixed `plane_z=0`; the `map_tide` vertical-tide-drift component of H is orthogonal
    — parameterize `plane_z` from the tide frame, or defer it with a note on #10. *Quantization:* on the
@@ -69,8 +69,8 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
 7. **Tests (#10 L)** — occupancy buffer (hit raises / miss+decay lowers / threshold / decays to prior
    over time / **survives a sequence of fractional-meter origin shifts**), waterline-contact +
    free-space-miss + occlusion, two-source fusion reinforcing one world cell, param validate+apply.
-8. **Docs + config follow-up (this is what closes #19)** — document new params; the dependent seafloor
-   `nav2_params.yaml` migration (4 blocks → 1 multi-source) **is the PR that closes #19**, since it
+8. **Docs + config follow-up (this is what finalizes #19)** — document new params; the dependent seafloor
+   `nav2_params.yaml` migration (4 blocks → 1 multi-source) **is the PR that finalizes #19**, since it
    activates cross-camera fusion and is where the handoff AC is verified (bag/sim). Note IzzyBoat parity.
 
 ## Files to Change
@@ -84,7 +84,7 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
 | `sea_surface_segmentation/test/test_segments_projection.cpp` | Waterline tests (done) + contact/miss/occlusion + fusion cases |
 | `sea_surface_segmentation/CMakeLists.txt` | Register new test |
 | `sea_surface_segmentation/README*` / params doc | Document sources, decay, thresholds, runtime-tunable params |
-| seafloor `echoboat_project11/config/nav2_params.yaml` *(follow-up PR — closes #19)* | 4 instances → 1 multi-source block (local_costmap only; global_costmap doesn't use the layer) |
+| seafloor `echoboat_project11/config/nav2_params.yaml` *(follow-up PR — finalizes #19)* | 4 instances → 1 multi-source block (local_costmap only; global_costmap doesn't use the layer) |
 
 ## Principles Self-Check
 
@@ -109,7 +109,7 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
 
 | If we change... | Also update... | Included? |
 |---|---|---|
-| `SeaSurfaceLayer` params/behavior | seafloor `nav2_params.yaml` (4→1 multi-source, local_costmap only) | Follow-up PR — **closes #19** |
+| `SeaSurfaceLayer` params/behavior | seafloor `nav2_params.yaml` (4→1 multi-source, local_costmap only) | Follow-up PR — **finalizes #19** |
 | ... | IzzyBoat config parity (#120/#181) | Noted for follow-up |
 | `segments_projection.hpp` (shared header) | confirm `segments_to_pointcloud.cpp` (reflex feed) unaffected by the new helper | Yes |
 | The layer | package README / param docs | Yes |
@@ -120,7 +120,7 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
 
 - **Decay model — DECIDED: log-odds** (2026-05-27). Tuning scalars live-reconfigurable (phase 6).
 - **#19 closure / sequencing — DECIDED** (2026-05-27, review-plan): this perception PR is _Part of_ #19
-  (capability); the seafloor config PR activates fusion, verifies the handoff, and closes #19.
+  (capability); the seafloor config PR activates fusion, verifies the handoff, and finalizes #19.
 - **#10 H tide z-drift — OPEN (non-blocking)**: parameterize `plane_z` from the tide frame in this work,
   or defer as a separate #10 sub-item? (lean: parameterize if cheap, else defer with a #10 note.)
 - **Default tuning** — decay half-life, hit/miss increments, lethal threshold: propose conservative
@@ -129,7 +129,7 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
 ## Estimated Scope
 
 This perception PR (atomic commits per phase, each buildable + single-source-correct) + a dependent
-`seafloor_echoboat_project11` config PR that **closes #19**. Phase 1 (origin-decoupled float log-odds
+`seafloor_echoboat_project11` config PR that **finalizes #19**. Phase 1 (origin-decoupled float log-odds
 buffer + its fractional-shift drift test) is the riskiest, independently reviewable piece — if the
 single perception PR proves unwieldy in review, split phase 1 out first. Bookkeeping handled here; no
 per-ticket overhead for the user.
