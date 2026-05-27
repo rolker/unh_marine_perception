@@ -92,6 +92,14 @@ public:
     return static_cast<double>(map_.atPosition("log_odds", position));
   }
 
+  // Forget everything — reset all cells to unobserved and re-seed the decay
+  // clock on the next decay() call.
+  void clear()
+  {
+    map_["log_odds"].setConstant(NAN);
+    seeded_ = false;
+  }
+
   const grid_map::GridMap & map() const { return map_; }
   const OccupancyParams & params() const { return params_; }
 

@@ -45,10 +45,10 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
    and rolling, the helper owns the evidence math.
 3. **Inverted projection + waterline-contact + occlusion (#10 I; shadow)** — per segmentation frame,
    scan image columns for the waterline contact (`is_waterline_contact_pixel`) and back-project **only
-   the contact** onto the water surface (z=0 in `map_tide`) → `hit`; raytrace the free cells between the
-   camera and the contact → `miss` (clearing); leave the occluded region beyond the contact unobserved
-   (decays, never marked). Needs a **new** pure helper (contact-only projection + camera→contact
-   free-space raytrace) — `project_obstacle_pixels` emits points for *all* obstacle pixels and is the
+   the contact** onto the water surface (z=0 in `map_tide`) → `hit`; water pixels → `miss` (free
+   observations clear where water is positively seen); leave the occluded region beyond the contact
+   unobserved (decays, never marked). Implemented in the **new** `project_observations` helper —
+   `project_obstacle_pixels` emits points for *all* obstacle pixels and is the
    wrong primitive; it stays unchanged for its other consumer `segments_to_pointcloud.cpp` (reflex feed),
    confirmed unaffected. Folds in `fe337f6`; addresses #10 I. **z=0 is correct here**: the boat floats
    and `map_tide` z=0 tracks the water surface, so projecting onto z=0 *is* projecting onto the real
@@ -145,6 +145,13 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
   `${grid_map_core_INCLUDE_DIRS}` var is empty under the modern target export; pull the path from the
   imported target (`get_target_property(... INTERFACE_INCLUDE_DIRECTORIES)`) and `include_directories()`
   it globally. The layer-integration phase must keep this.
+- **Free-space clearing (phase 3):** chose **water-pixel-as-free** (`miss` at the ground point of each
+  segmented water pixel) over an explicit camera→contact Bresenham raytrace. It's more conservative —
+  it only clears cells the camera *positively observes as water*, not every cell along the ray
+  (which would clear unobserved cells too) — and falls out of the same per-pixel back-projection loop.
+- **Layer verification (phase 3):** the buffer and `project_observations` are unit-tested; the live
+  layer wiring (TF→pose, rolling, threshold-to-master) is verified by the bag→costmap→video utility
+  (see #19 follow-up) on the 2026-05-26 bag before the boat — the layer itself has no unit test.
 
 ## Estimated Scope
 

@@ -84,7 +84,8 @@ add_library("sea_surface_layer" SHARED
 )
 add_library("sea_surface_layer::sea_surface_layer" ALIAS "sea_surface_layer")
 
-target_link_libraries(sea_surface_layer 
+target_link_libraries(sea_surface_layer
+  grid_map_core::grid_map_core
   image_geometry::image_geometry
   nav2_costmap_2d::nav2_costmap_2d_core
   rclcpp::rclcpp

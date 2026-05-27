@@ -15,6 +15,8 @@
 
 using sea_surface_segmentation::is_obstacle_pixel;
 using sea_surface_segmentation::is_waterline_contact_pixel;
+using sea_surface_segmentation::project_observations;
+using sea_surface_segmentation::OccupancyObservation;
 using sea_surface_segmentation::project_obstacle_pixels;
 using sea_surface_segmentation::ProjectedPoint;
 using sea_surface_segmentation::ProjectionStats;
@@ -450,4 +452,69 @@ TEST(ProjectObstaclePixels, StatsAccountForPixelsAndProjections)
   EXPECT_EQ(stats.obstacle_pixels, 1u);
   EXPECT_EQ(stats.projected, 1u);
   EXPECT_EQ(stats.dropped_nonfinite, 0u);
+}
+
+// ---- project_observations: the shared per-frame logic (waterline-contact +
+//      occlusion + water-as-free) used by both the layer and the bag utility. ----
+
+namespace
+{
+// Small nadir camera (16×12 @ fx=fy=10, 2 m up looking straight down) so every
+// pixel projects to a valid ground point — lets the classification counts be
+// asserted exactly without geometry dropping pixels.
+image_geometry::PinholeCameraModel make_small_nadir_camera()
+{
+  image_geometry::PinholeCameraModel m;
+  m.fromCameraInfo(make_pinhole_info(16, 12, 10.0, 10.0));
+  return m;
+}
+const cv::Vec3d kNadirOrigin(0.0, 0.0, 2.0);
+
+std::pair<int, int> count_obs(const std::vector<OccupancyObservation> & obs)
+{
+  int obstacle = 0, free = 0;
+  for (const auto & o : obs) { (o.obstacle ? obstacle : free)++; }
+  return {obstacle, free};
+}
+}  // namespace
+
+// All-water mask → every pixel is a free observation, no obstacles.
+TEST(ProjectObservations, AllWaterIsAllFree)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // green = water
+  const auto obs = project_observations(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(), /*max_range=*/100.0);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_EQ(obstacle, 0);
+  EXPECT_EQ(free, 16 * 12);
+}
+
+// A 3-pixel-tall obstacle in one column (rows 2,3,4, water below) yields exactly
+// ONE obstacle observation (the waterline contact, row 4); the two body pixels
+// are occluded and skipped (not free, not obstacle); all water → free. This is
+// the shadow/occlusion behavior.
+TEST(ProjectObservations, TallObstacleYieldsOneContactNotBody)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));
+  for (int row = 2; row <= 4; ++row) {
+    mask.at<cv::Vec3b>(row, 8) = cv::Vec3b(200, 0, 0);  // red = obstacle
+  }
+  const auto obs = project_observations(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(), /*max_range=*/100.0);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_EQ(obstacle, 1) << "only the waterline contact, not each body pixel";
+  EXPECT_EQ(free, 16 * 12 - 3) << "all water pixels free; 3 obstacle pixels are not free";
+  EXPECT_EQ(static_cast<int>(obs.size()), 16 * 12 - 2) << "2 body pixels skipped entirely";
+}
+
+// An isolated obstacle pixel with water directly below is a contact → 1 obstacle.
+TEST(ProjectObservations, IsolatedContactIsObstacle)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));
+  mask.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);  // row 7 below is water
+  const auto obs = project_observations(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(), /*max_range=*/100.0);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_EQ(obstacle, 1);
+  EXPECT_EQ(free, 16 * 12 - 1);
 }
