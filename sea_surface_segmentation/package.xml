@@ -16,6 +16,7 @@
   <depend>depthai</depend>
   <depend>depthai_bridge</depend>
   <depend>depthai_marine</depend>
+  <depend>grid_map_core</depend>
   <depend>image_geometry</depend>
   <depend>lifecycle_msgs</depend>
   <depend>nav2_costmap_2d</depend>

@@ -135,6 +135,17 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
 - **Default tuning** — decay half-life, hit/miss increments, lethal threshold: propose conservative
   defaults, tune on water (non-blocking).
 
+## Implementation Notes
+
+- **grid_map CMake gotcha (phase 1):** `grid_map_core`'s extras inject
+  `-DEIGEN_*_PLUGIN="grid_map_core/eigen_plugins/..."` via **global `add_definitions`** at
+  `find_package` time, so *every* TU compiled afterward needs grid_map_core's include dir — not just
+  targets that link `grid_map_core::grid_map_core` (else unrelated targets like
+  `segments_to_pointcloud` fail with "FunctorsPlugin.hpp: No such file"). The legacy
+  `${grid_map_core_INCLUDE_DIRS}` var is empty under the modern target export; pull the path from the
+  imported target (`get_target_property(... INTERFACE_INCLUDE_DIRECTORIES)`) and `include_directories()`
+  it globally. The layer-integration phase must keep this.
+
 ## Estimated Scope
 
 This perception PR (atomic commits per phase, each buildable + single-source-correct) + a dependent

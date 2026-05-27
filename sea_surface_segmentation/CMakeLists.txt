@@ -17,6 +17,14 @@ find_package(depthai CONFIG REQUIRED)
 find_package(depthai_bridge REQUIRED)
 find_package(depthai_marine REQUIRED)
 find_package(image_geometry REQUIRED)
+find_package(grid_map_core REQUIRED)
+# grid_map_core's extras inject -DEIGEN_*_PLUGIN globally via add_definitions, so
+# every TU compiled past this point needs grid_map_core's include dir to find the
+# plugin headers — not just the targets that link grid_map_core::grid_map_core.
+# The legacy *_INCLUDE_DIRS var is empty under the modern target export, so pull
+# the path from the imported target and add it globally.
+get_target_property(grid_map_core_INC grid_map_core::grid_map_core INTERFACE_INCLUDE_DIRECTORIES)
+include_directories(${grid_map_core_INC})
 find_package(lifecycle_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(pcl_conversions REQUIRED)
@@ -144,6 +152,17 @@ if(BUILD_TESTING)
     image_geometry::image_geometry
     tf2::tf2
     ${sensor_msgs_TARGETS}
+  )
+
+  # occupancy_buffer.hpp is the pure log-odds buffer (grid_map storage +
+  # rolling); private to the layer in src/, exercised via this GTest. Links
+  # grid_map_core for GridMap.
+  ament_add_gtest(test_occupancy_buffer test/test_occupancy_buffer.cpp)
+  target_include_directories(test_occupancy_buffer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(test_occupancy_buffer
+    grid_map_core::grid_map_core
   )
 
   # launch_testing integration: replay a 20s slice of the 2026-05-22
