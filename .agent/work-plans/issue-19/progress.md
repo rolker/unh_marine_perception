@@ -27,3 +27,21 @@ idiom.
 - [ ] Settle the decay-model open question (log-odds vs hit/miss+time-decay) before plan-task locks the design; record the choice in the issue
 - [ ] Tests targeting persistence/decay, multi-camera fusion, and concurrency (satisfies #10 L)
 - [ ] Track cross-repo config consequence: seafloor_echoboat_project11 nav2_params.yaml (4 blocks → 1 multi-source) + IzzyBoat parity (#120/#181)
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-05-27 11:24 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+
+**Plan**: `.agent/work-plans/issue-19/plan.md` at `4cd2020`
+**PR**: https://github.com/rolker/unh_marine_perception/pull/20 (`[PLAN]` prefix)
+**Phases**: single PR, 8 phased atomic commits (+ 1 dependent seafloor config-migration PR)
+
+Plan reconciles the review-issue findings: #10 items D/I/H/E/F/L folded into the rewrite; one
+cohesive perception PR (back-compat single-source) so the code lands before the config flip;
+log-odds chosen as the recommended decay model. fe337f6 (waterline patch) folds into phase 3.
+
+### Open questions
+- [ ] Decay/clearing model — log-odds (recommended) vs hit/miss+time-decay; confirm/veto at review-plan
+- [ ] Sequencing — perception capability PR first (back-compat), then seafloor config-migration PR to activate cross-camera fusion? (recommended yes)
+- [ ] Default tuning — decay half-life, hit/miss increments, lethal threshold (propose defaults, tune on water)
