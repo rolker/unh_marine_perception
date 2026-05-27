@@ -68,3 +68,27 @@ migration is local_costmap-only (plan scope correct). Four must-fixes below.
 - [ ] (suggestion) Phase-6 param callback: validate (reject NaN/negative/out-of-range, return successful=false), no re-lock — plan.md phase 6
 - [ ] (suggestion) State a per-phase invariant: each commit leaves the layer buildable AND single-source-correct — plan.md Approach
 - [ ] (suggestion) Reconsider `isClearable()` (hard-coded false today) under a decaying-occupancy model — plan.md phase 1/5
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-05-27 13:12 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-19 at `76c0c38`
+**Mode**: pre-push
+**Depth**: Standard (reason: ~390-line C++ change to a perception costmap-layer package)
+**Must-fix**: 3 | **Suggestions**: 3
+
+Phase 1 (grid_map occupancy buffer). cppcheck clean. Claude + Copilot adversarial both independently
+flagged the lethal_threshold lower-bound gap (cross-model confirmation). Architecture/logic otherwise
+confirmed correct by both (NaN-as-prior, decay vectorization, grid_map move semantics, row/col order,
+body-pixel NO_INFORMATION safety).
+
+### Findings
+- [ ] (must-fix) `validate()` accepts non-positive `lethal_threshold` → 0 makes a single hit lethal (defeats flicker rejection); negative makes a water `miss` read lethal (safety inversion). Require `>0`. — `occupancy_buffer.hpp:114`
+- [ ] (must-fix) `decay()` advances `last_decay_s_` before the `dt<=0` guard + uses `<0` as seed sentinel → backward-time over-decays next call; negative `now_s` re-seeds forever. Use `seeded_` flag, don't advance clock on non-positive dt. — `occupancy_buffer.hpp:69`
+- [ ] (must-fix) Validation test only checks the upper threshold bound; add negative-threshold rejection + backward-time decay cases. — `test_occupancy_buffer.cpp`
+- [ ] (suggestion) Bounds-guard `is_waterline_contact_pixel` at entry for future callers. — `segments_projection.hpp:64`
+- [ ] (suggestion) Rename/recomment "FractionalShifts" test: grid_map snaps move() to integer cells, so it proves no-drift + exposed-unobserved, not sub-cell residual. — `test_occupancy_buffer.cpp:95`
+- [ ] (suggestion) `setParams`/ctor trust caller to validate; phase-6 param callback is the enforced gate (deferred). — `occupancy_buffer.hpp:99`
