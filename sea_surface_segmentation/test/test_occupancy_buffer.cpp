@@ -89,16 +89,35 @@ TEST(OccupancyBuffer, DecayForgetsObstacleOverTime)
   EXPECT_LT(std::fabs(buf.logOdds(kP)), 0.01) << "decays toward the prior (0)";
 }
 
-// MUST-FIX #1: rolling the window by a *sequence of fractional-meter* shifts
-// must preserve accumulated evidence at its true world cell (not drift it to a
-// neighbour or wipe it), and newly-exposed cells must read as unobserved.
-TEST(OccupancyBuffer, FractionalShiftsPreserveEvidenceAtWorldCell)
+// A backward time jump (clock reset / sim-time discontinuity) must not decay and
+// must not rewind the decay reference: evidence is held, and the next forward
+// step measures true elapsed time from the original reference (not the blip).
+TEST(OccupancyBuffer, BackwardTimeDoesNotDecayOrRewind)
+{
+  auto buf = make_buffer();  // half-life 30 s
+  buf.hit(kP); buf.hit(kP);  // 1.70 → lethal
+  buf.decay(100.0);          // seed reference at t=100
+  buf.decay(50.0);           // backward: must not decay, must not rewind reference
+  EXPECT_NEAR(buf.logOdds(kP), 1.70, 1e-5) << "backward time must not decay";
+  EXPECT_TRUE(buf.isLethal(kP));
+  buf.decay(130.0);          // dt measured from 100 (not 50) → exactly one half-life
+  EXPECT_NEAR(buf.logOdds(kP), 0.85, 1e-4)
+    << "elapsed measured from the held reference, not the backward blip";
+}
+
+// Rolling the window through a sequence of origin shifts must preserve
+// accumulated evidence at its true world cell (not drift it to a neighbour or
+// wipe it), and newly-exposed cells must read as unobserved. grid_map's move()
+// snaps each shift to whole cells and carries the sub-cell residual internally,
+// so this exercises no-drift-across-rolling + exposed-unobserved — the core of
+// review-plan must-fix #1 — rather than the residual arithmetic itself.
+TEST(OccupancyBuffer, RollingPreservesEvidenceAtWorldCell)
 {
   auto buf = make_buffer();
   buf.hit(kP); buf.hit(kP);  // lethal at world (0.3, 0)
   ASSERT_TRUE(buf.isLethal(kP));
 
-  // Roll the window through sub-cell (0.25 m) origin steps to an end center of
+  // Roll the window through successive origin steps to an end center of
   // (1.0, 0). kP stays inside the window throughout.
   buf.move(grid_map::Position(0.3, 0.0));
   buf.move(grid_map::Position(0.6, 0.0));
@@ -141,6 +160,12 @@ TEST(OccupancyBuffer, ValidateRejectsBadParams)
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 
   p = OccupancyParams{}; p.lethal_threshold = 99.0;  // must be <= clamp
+  EXPECT_FALSE(OccupancyBuffer::validate(p, why));
+
+  p = OccupancyParams{}; p.lethal_threshold = 0.0;   // must be > 0 (else 1 hit = lethal)
+  EXPECT_FALSE(OccupancyBuffer::validate(p, why));
+
+  p = OccupancyParams{}; p.lethal_threshold = -1.0;  // negative inverts safety (water => lethal)
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 
   p = OccupancyParams{}; p.hit_log_odds = std::nan("");  // finite required

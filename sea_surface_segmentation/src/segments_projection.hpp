@@ -64,6 +64,9 @@ inline bool is_obstacle_pixel(const cv::Vec3b & pixel)
 // the contact lethal and skip the rest.
 inline bool is_waterline_contact_pixel(const cv::Mat & mask, int row, int col)
 {
+  if (row < 0 || col < 0 || row >= mask.rows || col >= mask.cols) {
+    return false;  // defensive: out-of-range never a contact
+  }
   if (!is_obstacle_pixel(mask.at<cv::Vec3b>(row, col))) {
     return false;
   }

@@ -63,10 +63,14 @@ public:
   // the clock. NaN (unobserved) cells are unaffected (NaN * factor == NaN).
   void decay(double now_s)
   {
-    if (last_decay_s_ < 0.0) { last_decay_s_ = now_s; return; }
+    if (!seeded_) { seeded_ = true; last_decay_s_ = now_s; return; }
     const double dt = now_s - last_decay_s_;
-    last_decay_s_ = now_s;
+    // On a non-positive dt (backward time jump / clock reset) do nothing AND
+    // don't advance the reference, so the next forward step measures true
+    // elapsed time and a time discontinuity never erases evidence (the safe
+    // direction for an obstacle layer).
     if (dt <= 0.0 || params_.decay_half_life_s <= 0.0) { return; }
+    last_decay_s_ = now_s;
     const float factor = static_cast<float>(std::pow(0.5, dt / params_.decay_half_life_s));
     grid_map::Matrix & data = map_["log_odds"];
     data = (data.array() * factor).matrix();
@@ -111,8 +115,13 @@ public:
     if (!std::isfinite(p.clamp) || p.clamp <= 0.0) {
       why = "clamp must be finite and > 0"; return false;
     }
-    if (!std::isfinite(p.lethal_threshold) || p.lethal_threshold > p.clamp) {
-      why = "lethal_threshold must be finite and <= clamp"; return false;
+    if (!std::isfinite(p.lethal_threshold) || p.lethal_threshold <= 0.0 ||
+      p.lethal_threshold > p.clamp)
+    {
+      // Lower bound matters: a threshold of 0 makes a single hit lethal (defeats
+      // flicker rejection); a negative one makes a water `miss` read lethal — a
+      // safety inversion on an obstacle layer.
+      why = "lethal_threshold must be finite and in (0, clamp]"; return false;
     }
     if (!std::isfinite(p.decay_half_life_s) || p.decay_half_life_s <= 0.0) {
       why = "decay_half_life_s must be finite and > 0"; return false;
@@ -132,7 +141,8 @@ private:
 
   grid_map::GridMap map_;
   OccupancyParams params_;
-  double last_decay_s_ = -1.0;
+  double last_decay_s_ = 0.0;
+  bool seeded_ = false;
 };
 
 }  // namespace sea_surface_segmentation
