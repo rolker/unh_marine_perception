@@ -92,3 +92,26 @@ body-pixel NO_INFORMATION safety).
 - [ ] (suggestion) Bounds-guard `is_waterline_contact_pixel` at entry for future callers. — `segments_projection.hpp:64`
 - [ ] (suggestion) Rename/recomment "FractionalShifts" test: grid_map snaps move() to integer cells, so it proves no-drift + exposed-unobserved, not sub-cell residual. — `test_occupancy_buffer.cpp:95`
 - [ ] (suggestion) `setParams`/ctor trust caller to validate; phase-6 param callback is the enforced gate (deferred). — `occupancy_buffer.hpp:99`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-05-27 14:04 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+**Verdict**: changes-requested → addressed
+
+**Branch**: feature/issue-19 at `3f618a1`
+**Mode**: pre-push
+**Depth**: Standard (reason: phase-3 layer rewrite — safety costmap layer, TF + projection + rolling)
+**Must-fix**: 1 | **Suggestions**: 3
+
+Phase 3 (layer consumes occupancy buffer). cppcheck clean (lone hit is a cross-TU false positive).
+Claude + Copilot adversarial both confirmed the risky geometry CORRECT (TF cam→world direction
+matches the reflex feed; project_observations contact/occlusion; rolling-vs-resize split = #10-D fix;
+decay/threshold cycle; LETHAL-only master stamping). Both independently flagged the camera_model_ race
+(cross-model) — fixed in `3f618a1`.
+
+### Findings
+- [x] (must-fix) camera_model_ read/deref outside lock vs locked write → torn read/UAF; fixed via immutable-snapshot (fresh model swap + shared_ptr copy under lock) — `sea_surface_layer.cpp` (3f618a1)
+- [ ] (suggestion, phase 5) `current_` never set true → affects LayeredCostmap::isCurrent(); pre-existing, fold into phase-5 thread-safety/lifecycle — `sea_surface_layer.cpp`
+- [ ] (suggestion) `maximum_range_` (100) advertises reach the buffer window can't fill; observations past the window are projected then dropped — clamp to half-extent or document — `sea_surface_layer.cpp`
+- [ ] (suggestion) remaining camera_model_/count_x_ thread-safety hardening still owed to phase 5 (this fix covers camera_model_; count_x_ read in updateBounds still unlocked) — `sea_surface_layer.cpp`
