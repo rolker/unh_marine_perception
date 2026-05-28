@@ -381,15 +381,16 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
       const cv::Vec3d pc = rotation_target_to_cam * d;    // cell in camera optical frame
       if (pc[2] <= 0.0) { continue; }                     // behind the camera (+z forward)
       const cv::Point2d uv = camera_model.project3dToPixel(cv::Point3d(pc[0], pc[1], pc[2]));
+      if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) { continue; }
       const int u = static_cast<int>(std::lround(uv.x));
       const int v = static_cast<int>(std::lround(uv.y));
       if (u < 0 || u >= mask_rgb8.cols || v < 0 || v >= mask_rgb8.rows) { continue; }
       const cv::Vec3b px = mask_rgb8.at<cv::Vec3b>(v, u);
       if (is_obstacle_pixel(px)) {
-        if (contact_row[u] >= 0 && v >= contact_row[u]) {
+        if (v == contact_row[u]) {
           observations.push_back({wx, wy, true});         // waterline contact → hit
         }
-        // else: above the contact = occluded body → leave unobserved
+        // else: above (or below an unselected) contact = body → leave unobserved
       } else if (px[1] > px[0] && px[1] > px[2]) {        // green-dominant = water
         observations.push_back({wx, wy, false});          // positively observed water → miss
       }
