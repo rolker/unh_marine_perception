@@ -175,15 +175,6 @@ public:
         });
     }
 
-    // Live-tunable params via `ros2 param set` (phase 6). Decay half-life,
-    // hit/miss increments, clamp, lethal threshold, and maximum_range all
-    // reconfigure at runtime; topic and source-list params stay configure-time
-    // (subscriber re-bind is not supported here). The callback validates the
-    // proposed change before applying — a fat-fingered set can't silently
-    // poison the buffer interpretation.
-    param_callback_handle_ = node->add_on_set_parameters_callback(
-      std::bind(&SeaSurfaceLayer::onParametersSet, this, std::placeholders::_1));
-
     // Optional publish-and-relay: when `published_topic` is non-empty, the
     // layer republishes its lethal cells as a nav_msgs/OccupancyGrid on that
     // topic so the companion `SeaSurfaceRelayLayer` (in global_costmap) can
@@ -198,6 +189,22 @@ public:
       RCLCPP_INFO_STREAM(
         logger_, "SeaSurfaceLayer publishing lethal grid on '" << published_topic_ << "'");
     }
+
+    // Live-tunable params via `ros2 param set` (phase 6). Decay half-life,
+    // hit/miss increments, clamp, lethal threshold, and maximum_range all
+    // reconfigure at runtime; topic and source-list params stay configure-time
+    // (subscriber re-bind is not supported here). The callback validates the
+    // proposed change before applying — a fat-fingered set can't silently
+    // poison the buffer interpretation.
+    //
+    // IMPORTANT: must register AFTER every `declareParameter` above. rclcpp
+    // invokes on-set-parameters callbacks for the initial-value validation
+    // inside `declare_parameter`; if a configure-time param (e.g.
+    // `.published_topic`) were declared after this point, the callback's
+    // `is_configure_time` rejection would throw `InvalidParameterValueException`
+    // and abort `onInitialize` — the layer would fail to load.
+    param_callback_handle_ = node->add_on_set_parameters_callback(
+      std::bind(&SeaSurfaceLayer::onParametersSet, this, std::placeholders::_1));
   }
 
   void reset() override
@@ -216,24 +223,29 @@ public:
     double robot_x, double robot_y, double /*robot_yaw*/,
     double * min_x, double * min_y, double * max_x, double * max_y) override
   {
-    // Expand (don't clobber) the master bounds so earlier layers' contributions survive.
-    *min_x = std::min(*min_x, robot_x - maximum_range_);
-    *min_y = std::min(*min_y, robot_y - maximum_range_);
-    *max_x = std::max(*max_x, robot_x + maximum_range_);
-    *max_y = std::max(*max_y, robot_y + maximum_range_);
-
+    // Snapshot the live-tunable scalars + parent-geometry tracking under the
+    // lock. `maximum_range_` is written by the parameter callback under the
+    // same lock; the 4 bound-expansion reads below would otherwise race a
+    // concurrent `ros2 param set`. `count_x_/count_y_/resolution_` are written
+    // under the lock in `matchSize()`; reading them here under the lock keeps
+    // the geometry-change detection from tearing.
     auto parent = layered_costmap_->getCostmap();
+    double maximum_range;
     bool geometry_changed;
     {
-      // count_x_/count_y_/resolution_ are written under costmap_mutex_ in
-      // matchSize(); read them under the same lock here so the geometry-change
-      // detection can't tear against a concurrent matchSize() invocation.
       std::lock_guard<std::mutex> lock(costmap_mutex_);
+      maximum_range = maximum_range_;
       geometry_changed =
         parent->getSizeInCellsX() != count_x_ ||
         parent->getSizeInCellsY() != count_y_ ||
         parent->getResolution() != resolution_;
     }
+
+    // Expand (don't clobber) the master bounds so earlier layers' contributions survive.
+    *min_x = std::min(*min_x, robot_x - maximum_range);
+    *min_y = std::min(*min_y, robot_y - maximum_range);
+    *max_x = std::max(*max_x, robot_x + maximum_range);
+    *max_y = std::max(*max_y, robot_y + maximum_range);
 
     if (geometry_changed) {
       matchSize();  // recreate the buffer at the new size/resolution (locks internally)
