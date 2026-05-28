@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "cv_bridge/cv_bridge.hpp"
 #include "image_geometry/pinhole_camera_model.hpp"
@@ -22,15 +23,41 @@
 namespace sea_surface_layer
 {
 
-// Costmap layer that fuses camera segmentation into a persistent, decaying
-// log-odds occupancy buffer (see occupancy_buffer.hpp). Each segmentation frame
-// contributes ground-plane observations via `project_observations_inverse`
-// (iterate world cells in the camera's reach, classify each by the pixel it
-// covers: waterline contact → hit, water → miss, occluded body / sky → skip);
-// the buffer remembers obstacles through gaps and forgets them over time.
-// Phase 1+3 of #19; still single-source (multi-camera fusion is phase 4).
+// Costmap layer that fuses one OR MORE camera segmentation streams into a
+// shared persistent, decaying log-odds occupancy buffer (see
+// occupancy_buffer.hpp). Each segmentation frame contributes ground-plane
+// observations via `project_observations_inverse` (iterate world cells in the
+// camera's reach, classify each by the pixel it covers: waterline contact →
+// hit, water → miss, occluded body / sky → skip); the buffer remembers
+// obstacles through gaps, forgets them over time, and accumulates evidence
+// from overlapping cameras into the same world cell. Phases 1, 3, 4 of #19.
+//
+// Sources are configured via `observation_sources` (a vector of string names);
+// each source has `<name>.segmentation_topic` and `<name>.camera_info_topic`.
+// When `observation_sources` is empty, the layer falls back to the legacy
+// top-level `segmentation_topic` / `camera_info_topic` as a single source
+// named "default" — pre-#19 configs work unchanged.
 class SeaSurfaceLayer: public nav2_costmap_2d::Layer
 {
+private:
+  // Per-source state — one per configured observation source. Defined here so
+  // the per-callback `Source &` parameter types resolve below.
+  //
+  // Stored as `unique_ptr<Source>` (not raw `Source`) so the address stays
+  // stable for the lifetime of the layer: the subscriptions capture `Source *`
+  // in their lambdas, and `sources_` would otherwise reallocate-and-invalidate
+  // those pointers if grown after onInitialize. The vector is built once and
+  // not modified after onInitialize completes.
+  struct Source
+  {
+    std::string name;
+    std::string segmentation_topic;
+    std::string camera_info_topic;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr seg_sub;
+    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub;
+    std::shared_ptr<image_geometry::PinholeCameraModel> camera_model;
+  };
+
 public:
   SeaSurfaceLayer() {}
   ~SeaSurfaceLayer() {}
@@ -61,12 +88,47 @@ public:
       params_ = sea_surface_segmentation::OccupancyParams{};
     }
 
-    declareParameter("segmentation_topic", rclcpp::ParameterValue("segmentation"));
-    std::string segmentation_topic;
-    node->get_parameter(name_ + ".segmentation_topic", segmentation_topic);
-    declareParameter("camera_info_topic", rclcpp::ParameterValue("camera_info"));
-    std::string camera_info_topic;
-    node->get_parameter(name_ + ".camera_info_topic", camera_info_topic);
+    // Source list — empty falls back to single-source legacy config.
+    declareParameter("observation_sources", rclcpp::ParameterValue(std::vector<std::string>{}));
+    std::vector<std::string> source_names;
+    node->get_parameter(name_ + ".observation_sources", source_names);
+
+    if (source_names.empty()) {
+      // Back-compat: pre-#19 single-source configuration.
+      declareParameter("segmentation_topic", rclcpp::ParameterValue(std::string("segmentation")));
+      declareParameter("camera_info_topic", rclcpp::ParameterValue(std::string("camera_info")));
+      std::string seg, info;
+      node->get_parameter(name_ + ".segmentation_topic", seg);
+      node->get_parameter(name_ + ".camera_info_topic", info);
+      sources_.push_back(std::make_unique<Source>(Source{"default", seg, info, {}, {}, {}}));
+    } else {
+      // Multi-source: one (segmentation, camera_info) pair per named source.
+      // All sources feed the shared world-frame buffer, so a single obstacle
+      // in the overlap region accumulates evidence from every camera that
+      // sees it — the multi-camera fusion the per-camera layers couldn't do.
+      for (const auto & name : source_names) {
+        declareParameter(name + ".segmentation_topic", rclcpp::ParameterValue(std::string{}));
+        declareParameter(name + ".camera_info_topic", rclcpp::ParameterValue(std::string{}));
+        std::string seg, info;
+        node->get_parameter(name_ + "." + name + ".segmentation_topic", seg);
+        node->get_parameter(name_ + "." + name + ".camera_info_topic", info);
+        if (seg.empty() || info.empty()) {
+          RCLCPP_ERROR_STREAM(
+            logger_,
+            "SeaSurfaceLayer source '" << name << "' is missing segmentation_topic "
+              "or camera_info_topic — skipping");
+          continue;
+        }
+        sources_.push_back(std::make_unique<Source>(Source{name, seg, info, {}, {}, {}}));
+      }
+    }
+
+    if (sources_.empty()) {
+      RCLCPP_WARN_STREAM(
+        logger_,
+        "SeaSurfaceLayer: no observation sources configured; layer will not "
+        "ingest any segmentation frames");
+    }
 
     global_frame_id_ = layered_costmap_->getGlobalFrameID();
 
@@ -74,13 +136,23 @@ public:
     // message can't dispatch segmentsCallback against a null buffer_.
     matchSize();
 
-    segments_subscriber_ = node->create_subscription<sensor_msgs::msg::Image>(
-      segmentation_topic, rclcpp::SensorDataQoS(),
-      std::bind(&SeaSurfaceLayer::segmentsCallback, this, std::placeholders::_1));
-
-    camera_info_subscriber_ = node->create_subscription<sensor_msgs::msg::CameraInfo>(
-      camera_info_topic, rclcpp::SensorDataQoS(),
-      std::bind(&SeaSurfaceLayer::cameraInfoCallback, this, std::placeholders::_1));
+    for (auto & src_uptr : sources_) {
+      // Capture the raw pointer in the lambda (Source's address is stable for
+      // the lifetime of sources_; unique_ptr only moves when the vector is
+      // modified, which we don't do after onInitialize). The Source struct
+      // outlives the subscriptions because the subs are members of it.
+      Source * src = src_uptr.get();
+      src->seg_sub = node->create_subscription<sensor_msgs::msg::Image>(
+        src->segmentation_topic, rclcpp::SensorDataQoS(),
+        [this, src](sensor_msgs::msg::Image::SharedPtr msg) {
+          segmentsCallback(*src, msg);
+        });
+      src->info_sub = node->create_subscription<sensor_msgs::msg::CameraInfo>(
+        src->camera_info_topic, rclcpp::SensorDataQoS(),
+        [this, src](sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+          cameraInfoCallback(*src, msg);
+        });
+    }
 
     // Live-tunable params via `ros2 param set` (phase 6). Decay half-life,
     // hit/miss increments, clamp, lethal threshold, and maximum_range all
@@ -216,18 +288,24 @@ private:
       parent->getOriginY() + parent->getSizeInCellsY() * parent->getResolution() / 2.0);
   }
 
-  void segmentsCallback(const sensor_msgs::msg::Image::SharedPtr segments_msg)
+  // Per-source segmentation callback. `src` is the source that owns this
+  // subscription (captured by raw pointer in onInitialize's lambda); the
+  // shared occupancy buffer accumulates evidence from every source's hits and
+  // misses, so an obstacle in two cameras' overlap gets twice the evidence.
+  void segmentsCallback(
+    Source & src, const sensor_msgs::msg::Image::SharedPtr segments_msg)
   {
-    // Pin the camera model + buffer geometry under the lock, then project off-lock.
-    // cameraInfoCallback swaps in a *fresh* model (never mutates in place), so this
-    // local copy is an immutable snapshot — no torn read / use-after-free during
-    // projection. `resolution_` is captured here too because matchSize() can update
-    // it from updateBounds(); reading it inside the off-lock projection would race.
+    // Pin the per-source camera model + shared buffer geometry under the
+    // lock, then project off-lock. cameraInfoCallback swaps in a *fresh*
+    // model (never mutates in place), so this local copy is an immutable
+    // snapshot — no torn read / use-after-free during projection.
+    // `resolution_` is captured here too because matchSize() can update it
+    // from updateBounds(); reading it inside the off-lock projection would race.
     std::shared_ptr<image_geometry::PinholeCameraModel> camera_model;
     double res;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
-      camera_model = camera_model_;
+      camera_model = src.camera_model;
       res = resolution_;
     }
     if (!camera_model || res <= 0.0) {
@@ -286,11 +364,12 @@ private:
       if (auto node = node_.lock()) {
         // Throttle: a stuck TF or wrong-encoding image floods at the
         // segmentation publish rate (~5 Hz / camera × N cameras). Include the
-        // source frame and stamp so the log line is self-diagnostic.
+        // source name + image frame + stamp so the log line is self-diagnostic.
         auto clock = node->get_clock();
         RCLCPP_WARN_THROTTLE(
           logger_, *clock, 5000,
-          "SeaSurfaceLayer projection failed for %s @ %d.%09d: %s",
+          "SeaSurfaceLayer source '%s' projection failed for %s @ %d.%09d: %s",
+          src.name.c_str(),
           segments_msg->header.frame_id.c_str(),
           segments_msg->header.stamp.sec, segments_msg->header.stamp.nanosec,
           e.what());
@@ -298,7 +377,11 @@ private:
     }
   }
 
-  void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr camera_info_msg)
+  // Per-source camera_info callback. Updates the source's own camera model;
+  // each source carries its own intrinsics (the 4-camera config has different
+  // optics per direction, e.g. forward narrow-FOV vs side wide-FOV).
+  void cameraInfoCallback(
+    Source & src, const sensor_msgs::msg::CameraInfo::SharedPtr camera_info_msg)
   {
     // Build a fresh model off-lock, then swap the pointer under the lock. Readers
     // that already copied the old pointer keep using an unchanged object — no
@@ -306,7 +389,7 @@ private:
     auto model = std::make_shared<image_geometry::PinholeCameraModel>();
     model->fromCameraInfo(*camera_info_msg);
     std::lock_guard<std::mutex> lock(costmap_mutex_);
-    camera_model_ = model;
+    src.camera_model = model;
   }
 
   // Validate-then-apply param updates. Runs on the parameter service thread.
@@ -386,10 +469,7 @@ private:
   sea_surface_segmentation::OccupancyParams params_;
   std::unique_ptr<sea_surface_segmentation::OccupancyBuffer> buffer_;
 
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr segments_subscriber_;
-  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscriber_;
-
-  std::shared_ptr<image_geometry::PinholeCameraModel> camera_model_;
+  std::vector<std::unique_ptr<Source>> sources_;
 
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
