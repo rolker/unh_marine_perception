@@ -115,3 +115,65 @@ decay/threshold cycle; LETHAL-only master stamping). Both independently flagged 
 - [ ] (suggestion, phase 5) `current_` never set true → affects LayeredCostmap::isCurrent(); pre-existing, fold into phase-5 thread-safety/lifecycle — `sea_surface_layer.cpp`
 - [ ] (suggestion) `maximum_range_` (100) advertises reach the buffer window can't fill; observations past the window are projected then dropped — clamp to half-extent or document — `sea_surface_layer.cpp`
 - [ ] (suggestion) remaining camera_model_/count_x_ thread-safety hardening still owed to phase 5 (this fix covers camera_model_; count_x_ read in updateBounds still unlocked) — `sea_surface_layer.cpp`
+
+## Offline Review: projection regression + global-costmap design
+**Status**: investigation complete; plan revised
+**When**: 2026-05-27 20:41 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+
+**Branch**: feature/issue-19 (local WIP: `bag_to_costmap_video` mosaic + inverse prototype + per-camera counters — not yet committed/reviewed)
+**Artifacts**: `~/data/logs/analysis/2026-05-27/mosaic_ep21_fwd_vs_inv/` — mosaic on the 2026-05-26 bag, episode #21 (13:17:41 EDT, ~2.0 m/s approach → STOP)
+
+Built an offline `bag_to_costmap_video` tool that replays recorded OAK segmentation through the phase-3
+pipeline and renders a 4-panel mosaic (4-cam segmentation | live boat costmap | NEW forward | NEW inverse),
+boat-centred and aligned in `map_tide`. Used it to A/B the projection direction on real water imagery.
+
+### Findings
+- [ ] (must-fix → plan) **Projection regression: forward, not inverse.** The committed phase-3
+  `project_observations` is forward per-pixel (pixel → one world point → one cell), despite the plan's
+  inverse / #10-I loop-inversion intent and the pre-#19 layer's inverse (cell→pixel) loop. Forward →
+  gaps at range, lone jittery hits that never reach the 2-hit lethal threshold, and a far-horizon speckle
+  "ring". Measured ep#21: **0.1 % lethal (forward) vs 3.2 % (inverse)** vs 6.8 % (live chart costmap);
+  inverse fills a coherent footprint that tracks the live obstacle through the maneuver. **Plan phase 3
+  updated to restore inverse projection** (keep contact-only; add an FOV frustum cull for cost).
+- [ ] (architecture → plan) **Buoys never reach the planner.** The controller (`CrabbingPathFollower`)
+  doesn't read the costmap; the global planner (`SmacPlannerHybrid`) plans on the global costmap, which
+  has charts + inflation but no segmentation. So the local sea-surface layer is operator-display-only for
+  planning. **Decision recorded:** publish-and-relay — `SeaSurfaceLayer` publishes its grid_map
+  contribution; a new thin `SeaSurfaceRelayLayer` feeds the global costmap (before inflation), mirroring
+  the `s57_grids`/`s57_layer` producer/consumer pattern. Projection runs once. New cross-repo scope.
+- [x] (no-op) The "blank aft tile" in the first mosaic was a thumbnail misread, **not** a bug:
+  per-camera counters show all four cameras fed the buffer (0 TF failures, ~4.4–4.7 M obs each). Kept the
+  counters + tile-store-before-TF as defensive hardening in the tool.
+
+### Open
+- [x] Global relay scope — **decided: all in #19** (no separate issue, 2026-05-27).
+- [ ] Commit/review the `bag_to_costmap_video` tool (mosaic + inverse prototype) — still local WIP.
+- [ ] seafloor remaining: migrate local 4→1 multi-source (the #19 finalizer) + add the global relay layer.
+
+**Correction (2026-05-27):** seafloor #18 is **closed/done** — it already re-enabled the layer as 4
+direction-named instances live in `bizzyboat_project11/config/nav2_overlay.yaml`, running the **pre-#19
+inverse** code. So segmentation IS deployed (local), and the LIVE panel in the A/B reflects inverse
+segmentation (chart + inverse sea-surface + inflation), not charts alone. This reframes the regression:
+the #19 forward `project_observations` regresses vs the **inverse layer currently running on bizzy**.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-05-27 23:04 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-19 (pre-push delta only — vs `origin/feature/issue-19`; phases 1+3 already reviewed)
+**Mode**: pre-push
+**Depth**: Standard (reason: ~625 lines, 5 files, governance-touching plan + non-trivial C++ tool)
+**Static**: cppcheck clean; xmllint clean
+**Adversarial**: Claude + Copilot (both, cross-confirmed on findings 2 + 3 + 6)
+**Must-fix**: 1 | **Suggestions**: 5
+
+### Findings
+- [ ] (must-fix) Inverse path marks sky (blue-dominant) as `miss` — overclear in the OURS panel; classify water=miss / sky=skip / contact=hit. — `tools/bag_to_costmap_video.cpp:201`
+- [ ] (suggestion) No arg validation — `--res`/`--window-m`/`--render-dt`/`--max-range` accept ≤0 → divide-by-zero/invalid Mat. — `tools/bag_to_costmap_video.cpp:231`
+- [ ] (suggestion) `render_live` assumes identity grid origin orientation + `bizzy/map_tide` frame — warn if violated. — `tools/bag_to_costmap_video.cpp:129`
+- [ ] (suggestion) No staleness guard on `live_costmap`; once latched, stale grid renders forever. — `tools/bag_to_costmap_video.cpp:303`
+- [ ] (suggestion) `obs_fed` counter semantics changed (inverse cells, not forward pixels); rename or legend. — `tools/bag_to_costmap_video.cpp:393`
+- [ ] (suggestion) Stale prose around the dropped forward A/B — plan + CMakeLists comment. — `plan.md`, `CMakeLists.txt:107`
