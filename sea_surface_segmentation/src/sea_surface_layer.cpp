@@ -1,6 +1,9 @@
 
 #include <algorithm>
+#include <chrono>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "cv_bridge/cv_bridge.hpp"
