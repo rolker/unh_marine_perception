@@ -171,3 +171,24 @@ TEST(OccupancyBuffer, ValidateRejectsBadParams)
   p = OccupancyParams{}; p.hit_log_odds = std::nan("");  // finite required
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 }
+
+// setParams reinterprets accumulated evidence immediately — a single hit that
+// sat just under the default lethal_threshold (1.0) becomes lethal once a
+// lower threshold (0.3) is applied at runtime, without re-observing the cell.
+// This is the live-tunable contract the layer's param callback relies on
+// (`SeaSurfaceLayer::onParametersSet` → `OccupancyBuffer::setParams`).
+TEST(OccupancyBuffer, SetParamsReinterpretsAccumulatedEvidence)
+{
+  auto buf = make_buffer();  // defaults: hit=0.85, threshold=1.0
+  EXPECT_TRUE(buf.hit(kP));
+  EXPECT_FALSE(buf.isLethal(kP)) << "0.85 < 1.0, not yet lethal at default threshold";
+
+  OccupancyParams looser = OccupancyParams{};
+  looser.lethal_threshold = 0.3;  // < 0.85; same accumulated evidence now reads lethal
+  std::string why;
+  ASSERT_TRUE(OccupancyBuffer::validate(looser, why)) << why;
+  buf.setParams(looser);
+
+  EXPECT_TRUE(buf.isLethal(kP))
+    << "lowered threshold must reinterpret accumulated 0.85 log-odds as lethal";
+}

@@ -8,6 +8,8 @@
 
 #include "cv_bridge/cv_bridge.hpp"
 #include "image_geometry/pinhole_camera_model.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "rclcpp/parameter.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
@@ -79,6 +81,15 @@ public:
     camera_info_subscriber_ = node->create_subscription<sensor_msgs::msg::CameraInfo>(
       camera_info_topic, rclcpp::SensorDataQoS(),
       std::bind(&SeaSurfaceLayer::cameraInfoCallback, this, std::placeholders::_1));
+
+    // Live-tunable params via `ros2 param set` (phase 6). Decay half-life,
+    // hit/miss increments, clamp, lethal threshold, and maximum_range all
+    // reconfigure at runtime; topic and source-list params stay configure-time
+    // (subscriber re-bind is not supported here). The callback validates the
+    // proposed change before applying — a fat-fingered set can't silently
+    // poison the buffer interpretation.
+    param_callback_handle_ = node->add_on_set_parameters_callback(
+      std::bind(&SeaSurfaceLayer::onParametersSet, this, std::placeholders::_1));
   }
 
   void reset() override
@@ -298,6 +309,69 @@ private:
     camera_model_ = model;
   }
 
+  // Validate-then-apply param updates. Runs on the parameter service thread.
+  // Builds a candidate copy of the live-tunable state from `params` (each named
+  // entry overrides the candidate field), validates the candidate (NaN /
+  // out-of-range / safety inversions are rejected via OccupancyBuffer::validate
+  // + a maximum_range > 0 check), and only on success swaps into the live state
+  // under `costmap_mutex_`. The buffer reinterprets accumulated evidence
+  // against the new threshold/clamp immediately; new increments and decay rate
+  // take effect on the next update cycle. Unknown / configure-time params
+  // (topics) pass through as a no-op so the parameter store can still record
+  // them.
+  rcl_interfaces::msg::SetParametersResult onParametersSet(
+    const std::vector<rclcpp::Parameter> & params)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+
+    sea_surface_segmentation::OccupancyParams candidate_occ;
+    double candidate_max_range;
+    {
+      std::lock_guard<std::mutex> lock(costmap_mutex_);
+      candidate_occ = params_;
+      candidate_max_range = maximum_range_;
+    }
+
+    for (const auto & p : params) {
+      const auto & n = p.get_name();
+      if (n == name_ + ".hit_log_odds") {
+        candidate_occ.hit_log_odds = p.as_double();
+      } else if (n == name_ + ".miss_log_odds") {
+        candidate_occ.miss_log_odds = p.as_double();
+      } else if (n == name_ + ".clamp") {
+        candidate_occ.clamp = p.as_double();
+      } else if (n == name_ + ".lethal_threshold") {
+        candidate_occ.lethal_threshold = p.as_double();
+      } else if (n == name_ + ".decay_half_life_s") {
+        candidate_occ.decay_half_life_s = p.as_double();
+      } else if (n == name_ + ".maximum_range") {
+        const double v = p.as_double();
+        if (!std::isfinite(v) || v <= 0.0) {
+          result.successful = false;
+          result.reason = "maximum_range must be finite and > 0";
+          return result;
+        }
+        candidate_max_range = v;
+      }
+    }
+
+    std::string why;
+    if (!sea_surface_segmentation::OccupancyBuffer::validate(candidate_occ, why)) {
+      result.successful = false;
+      result.reason = why;
+      return result;
+    }
+
+    std::lock_guard<std::mutex> lock(costmap_mutex_);
+    params_ = candidate_occ;
+    maximum_range_ = candidate_max_range;
+    if (buffer_) {
+      buffer_->setParams(params_);
+    }
+    return result;
+  }
+
   std::string global_frame_id_;
 
   // Parent-costmap geometry tracking (to detect true size/resolution changes
@@ -316,6 +390,8 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_subscriber_;
 
   std::shared_ptr<image_geometry::PinholeCameraModel> camera_model_;
+
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   std::mutex costmap_mutex_;
 };
