@@ -11,6 +11,7 @@
 #include "image_geometry/pinhole_camera_model.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "rclcpp/exceptions/exceptions.hpp"
 #include "rclcpp/parameter.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/image.hpp"
@@ -98,10 +99,11 @@ public:
       // Back-compat: pre-#19 single-source configuration.
       declareParameter("segmentation_topic", rclcpp::ParameterValue(std::string("segmentation")));
       declareParameter("camera_info_topic", rclcpp::ParameterValue(std::string("camera_info")));
-      std::string seg, info;
-      node->get_parameter(name_ + ".segmentation_topic", seg);
-      node->get_parameter(name_ + ".camera_info_topic", info);
-      sources_.push_back(std::make_unique<Source>(Source{"default", seg, info, {}, {}, {}}));
+      auto src = std::make_unique<Source>();
+      src->name = "default";
+      node->get_parameter(name_ + ".segmentation_topic", src->segmentation_topic);
+      node->get_parameter(name_ + ".camera_info_topic", src->camera_info_topic);
+      sources_.push_back(std::move(src));
     } else {
       // Multi-source: one (segmentation, camera_info) pair per named source.
       // All sources feed the shared world-frame buffer, so a single obstacle
@@ -110,17 +112,18 @@ public:
       for (const auto & name : source_names) {
         declareParameter(name + ".segmentation_topic", rclcpp::ParameterValue(std::string{}));
         declareParameter(name + ".camera_info_topic", rclcpp::ParameterValue(std::string{}));
-        std::string seg, info;
-        node->get_parameter(name_ + "." + name + ".segmentation_topic", seg);
-        node->get_parameter(name_ + "." + name + ".camera_info_topic", info);
-        if (seg.empty() || info.empty()) {
+        auto src = std::make_unique<Source>();
+        src->name = name;
+        node->get_parameter(name_ + "." + name + ".segmentation_topic", src->segmentation_topic);
+        node->get_parameter(name_ + "." + name + ".camera_info_topic", src->camera_info_topic);
+        if (src->segmentation_topic.empty() || src->camera_info_topic.empty()) {
           RCLCPP_ERROR_STREAM(
             logger_,
             "SeaSurfaceLayer source '" << name << "' is missing segmentation_topic "
               "or camera_info_topic — skipping");
           continue;
         }
-        sources_.push_back(std::make_unique<Source>(Source{name, seg, info, {}, {}, {}}));
+        sources_.push_back(std::move(src));
       }
     }
 
@@ -429,39 +432,56 @@ private:
     if (!node) {
       return;
     }
-    nav_msgs::msg::OccupancyGrid msg;
-    msg.header.stamp = node->now();
-    msg.header.frame_id = global_frame_id_;
 
+    // Snapshot pattern: copy the grid_map under the lock, walk it off-lock.
+    // The O(W*H) per-cell scan (~40k Eigen reads on a 200×200 buffer) would
+    // otherwise serialize against every segmentsCallback wanting to write a
+    // hit/miss. The copy is one Eigen MatrixXf deep-copy (≈ width*height*4 B
+    // — 160 kB on the same 200×200) — far cheaper than holding the lock
+    // through the scan.
+    grid_map::GridMap map_copy;
+    double threshold;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       if (!buffer_) {
         return;
       }
-      const auto & map = buffer_->map();
-      const auto size = map.getSize();
-      const auto center = map.getPosition();
-      msg.info.resolution = static_cast<float>(map.getResolution());
-      msg.info.width = static_cast<uint32_t>(size(0));
-      msg.info.height = static_cast<uint32_t>(size(1));
-      // grid_map is positioned by its center; OccupancyGrid origin is the
-      // lower-left corner of cell (0, 0).
-      msg.info.origin.position.x = center(0) - 0.5 * size(0) * map.getResolution();
-      msg.info.origin.position.y = center(1) - 0.5 * size(1) * map.getResolution();
-      msg.info.origin.position.z = 0.0;
-      msg.info.origin.orientation.w = 1.0;
-      msg.data.assign(static_cast<size_t>(size(0)) * size(1), -1);
+      map_copy = buffer_->map();  // grid_map copy assignment = deep copy of Eigen data
+      threshold = params_.lethal_threshold;
+    }
 
-      // Walk OccupancyGrid cells in row-major order; for each cell's world
-      // position, query the buffer's lethal test. Avoids dancing through
-      // grid_map's column-major / circular-buffer index layout.
-      for (uint32_t y = 0; y < msg.info.height; ++y) {
-        for (uint32_t x = 0; x < msg.info.width; ++x) {
-          const double wx = msg.info.origin.position.x + (x + 0.5) * msg.info.resolution;
-          const double wy = msg.info.origin.position.y + (y + 0.5) * msg.info.resolution;
-          if (buffer_->isLethal(grid_map::Position(wx, wy))) {
-            msg.data[static_cast<size_t>(y) * msg.info.width + x] = 100;
-          }
+    nav_msgs::msg::OccupancyGrid msg;
+    msg.header.stamp = node->now();
+    msg.header.frame_id = global_frame_id_;
+
+    const auto size = map_copy.getSize();
+    const auto center = map_copy.getPosition();
+    msg.info.resolution = static_cast<float>(map_copy.getResolution());
+    msg.info.width = static_cast<uint32_t>(size(0));
+    msg.info.height = static_cast<uint32_t>(size(1));
+    // grid_map is positioned by its center; OccupancyGrid origin is the
+    // lower-left corner of cell (0, 0).
+    msg.info.origin.position.x = center(0) - 0.5 * size(0) * map_copy.getResolution();
+    msg.info.origin.position.y = center(1) - 0.5 * size(1) * map_copy.getResolution();
+    msg.info.origin.position.z = 0.0;
+    msg.info.origin.orientation.w = 1.0;
+    msg.data.assign(static_cast<size_t>(size(0)) * size(1), -1);
+
+    // Walk OccupancyGrid cells in row-major order; for each cell's world
+    // position, query the snapshot copy. Walking by world position rather
+    // than direct index avoids dancing through grid_map's column-major /
+    // circular-buffer index layout.
+    for (uint32_t y = 0; y < msg.info.height; ++y) {
+      for (uint32_t x = 0; x < msg.info.width; ++x) {
+        const double wx = msg.info.origin.position.x + (x + 0.5) * msg.info.resolution;
+        const double wy = msg.info.origin.position.y + (y + 0.5) * msg.info.resolution;
+        const grid_map::Position p(wx, wy);
+        if (!map_copy.isInside(p)) {
+          continue;
+        }
+        const float v = map_copy.atPosition("log_odds", p);
+        if (std::isfinite(v) && static_cast<double>(v) >= threshold) {
+          msg.data[static_cast<size_t>(y) * msg.info.width + x] = 100;
         }
       }
     }
@@ -493,27 +513,71 @@ private:
       candidate_max_range = maximum_range_;
     }
 
-    for (const auto & p : params) {
-      const auto & n = p.get_name();
-      if (n == name_ + ".hit_log_odds") {
-        candidate_occ.hit_log_odds = p.as_double();
-      } else if (n == name_ + ".miss_log_odds") {
-        candidate_occ.miss_log_odds = p.as_double();
-      } else if (n == name_ + ".clamp") {
-        candidate_occ.clamp = p.as_double();
-      } else if (n == name_ + ".lethal_threshold") {
-        candidate_occ.lethal_threshold = p.as_double();
-      } else if (n == name_ + ".decay_half_life_s") {
-        candidate_occ.decay_half_life_s = p.as_double();
-      } else if (n == name_ + ".maximum_range") {
-        const double v = p.as_double();
-        if (!std::isfinite(v) || v <= 0.0) {
+    // Configure-time params — subscriber re-bind / publisher re-bind isn't
+    // supported here, so accepting these silently would leave the parameter
+    // store updated but the wiring stale (the operator's #10-K failure mode
+    // in a different disguise). Reject with a clear message instead. Each
+    // entry is matched as a suffix that may appear top-level (e.g.
+    // `<layer>.observation_sources`) OR per-source (e.g.
+    // `<layer>.<source>.segmentation_topic`).
+    const std::vector<std::string> configure_time_suffixes{
+      ".observation_sources", ".segmentation_topic", ".camera_info_topic",
+      ".published_topic"};
+
+    auto is_configure_time = [&](const std::string & n) {
+      if (n.find(name_ + ".") != 0) {
+        return false;  // not one of this layer's params
+      }
+      for (const auto & suffix : configure_time_suffixes) {
+        if (n.size() >= suffix.size() &&
+          n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0)
+        {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // `as_double()` raises rclcpp::exceptions::InvalidParameterTypeException
+    // when the parameter is set to a non-double value (e.g. a bool or string).
+    // That exception would propagate out of the parameter service thread and
+    // crash the node; wrap the dispatch so a wrong-type set returns a clean
+    // SetParametersResult{successful=false, reason=…} instead.
+    try {
+      for (const auto & p : params) {
+        const auto & n = p.get_name();
+
+        if (is_configure_time(n)) {
           result.successful = false;
-          result.reason = "maximum_range must be finite and > 0";
+          result.reason = n + " is configure-time only (subscriber/publisher "
+            "re-bind is not supported); restart the costmap to apply";
           return result;
         }
-        candidate_max_range = v;
+
+        if (n == name_ + ".hit_log_odds") {
+          candidate_occ.hit_log_odds = p.as_double();
+        } else if (n == name_ + ".miss_log_odds") {
+          candidate_occ.miss_log_odds = p.as_double();
+        } else if (n == name_ + ".clamp") {
+          candidate_occ.clamp = p.as_double();
+        } else if (n == name_ + ".lethal_threshold") {
+          candidate_occ.lethal_threshold = p.as_double();
+        } else if (n == name_ + ".decay_half_life_s") {
+          candidate_occ.decay_half_life_s = p.as_double();
+        } else if (n == name_ + ".maximum_range") {
+          const double v = p.as_double();
+          if (!std::isfinite(v) || v <= 0.0) {
+            result.successful = false;
+            result.reason = "maximum_range must be finite and > 0";
+            return result;
+          }
+          candidate_max_range = v;
+        }
       }
+    } catch (const rclcpp::exceptions::InvalidParameterTypeException & e) {
+      result.successful = false;
+      result.reason = std::string("invalid parameter type: ") + e.what();
+      return result;
     }
 
     std::string why;
