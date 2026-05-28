@@ -104,6 +104,32 @@ install(
   DESTINATION lib
 )
 
+# Offline bag → costmap video tool (#19 verification): replays recorded
+# segmentation through the OccupancyBuffer with the corrected INVERSE (cell→pixel)
+# projection, rendering a mosaic (4-cam tiles | live boat costmap | OURS-inverse)
+# for review before deployment. The forward `project_observations` lives in
+# segments_projection.hpp for the reflex pointcloud feed but is not used here.
+find_package(rosbag2_cpp REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(OpenCV REQUIRED)
+add_executable(bag_to_costmap_video tools/bag_to_costmap_video.cpp)
+target_include_directories(bag_to_costmap_video PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(bag_to_costmap_video
+  grid_map_core::grid_map_core
+  image_geometry::image_geometry
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  tf2::tf2
+  ${OpenCV_LIBS}
+  ${sensor_msgs_TARGETS}
+  ${tf2_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+)
+ament_target_dependencies(bag_to_costmap_video cv_bridge)
+install(TARGETS bag_to_costmap_video DESTINATION lib/${PROJECT_NAME})
+
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
