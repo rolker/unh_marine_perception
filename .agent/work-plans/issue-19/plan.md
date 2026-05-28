@@ -8,6 +8,13 @@ _Revised 2026-05-27 per review-plan (`c72005e`, changes-requested) and follow-up
 log-odds buffer backed by **grid_map** (resolves the float-buffer rolling risk via `GridMap::move()`);
 #10 H tide-drift confirmed a **non-issue for a floating platform** and dropped._
 
+_Revised again 2026-05-27 after offline review on the 2026-05-26 bag (episode #21): (1) **phase 3
+projection corrected forward → inverse** (the committed `project_observations` was a regression vs the
+pre-#19 inverse layer — forward leaves gaps/speckle and never reaches lethal); (2) **new global-costmap
+propagation** so the planner can route around buoys — `SeaSurfaceLayer` publishes its contribution and a
+thin `SeaSurfaceRelayLayer` feeds the global costmap (publish-and-relay, mirroring the S57 producer/
+consumer pattern). See the new section + Open Questions._
+
 ## Context
 
 Today: four independent `SeaSurfaceLayer` instances (forward/port/starboard/aft), each with a
@@ -43,21 +50,32 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
    threshold→LETHAL) in a **pure, unit-tested** helper (`occupancy_buffer.hpp`, mirroring the
    `segments_apply.hpp` pure-logic + test pattern) operating on the layer data — grid_map owns storage
    and rolling, the helper owns the evidence math.
-3. **Inverted projection + waterline-contact + occlusion (#10 I; shadow)** — per segmentation frame,
-   scan image columns for the waterline contact (`is_waterline_contact_pixel`) and back-project **only
-   the contact** onto the water surface (z=0 in `map_tide`) → `hit`; water pixels → `miss` (free
-   observations clear where water is positively seen); leave the occluded region beyond the contact
-   unobserved (decays, never marked). Implemented in the **new** `project_observations` helper —
-   `project_obstacle_pixels` emits points for *all* obstacle pixels and is the
-   wrong primitive; it stays unchanged for its other consumer `segments_to_pointcloud.cpp` (reflex feed),
-   confirmed unaffected. Folds in `fe337f6`; addresses #10 I. **z=0 is correct here**: the boat floats
-   and `map_tide` z=0 tracks the water surface, so projecting onto z=0 *is* projecting onto the real
-   surface at any tide — #10 H's vertical-drift worry does not apply to a floating platform (residuals:
-   TF stamp consistency, already handled via `lookupTransform` at the image stamp; wave heave, a small
-   transient handled by `base_link_level`). Note this on #10. *Quantization:* on the 128×96 mask,
-   contact-range uncertainty is range-dependent (one pixel-row ≈ meters near max range), so
-   decay/threshold defaults must tolerate a contact jittering across a few cells without re-creating
-   flicker — covered by a tuning note + test.
+3. **Projection: INVERSE (cell→pixel) + waterline-contact + occlusion (#10 I; shadow)** — for each
+   world cell in the buffer window, project the cell's ground point (z=0 in `map_tide`) into the camera
+   and classify it by the pixel it lands on: a cell whose pixel is its column's **waterline contact**
+   (`is_waterline_contact_pixel`) → `hit`; a cell seeing **water** → `miss` (free where water is
+   positively observed); a cell behind the contact (projecting to an above-contact body pixel) → left
+   **unobserved** (occluded; decays, never marked). This is the **inverse** direction the pre-#19 layer
+   used (iterate cells, sample the covering pixel): one large/distant pixel fills **every cell in its
+   footprint** (no gaps), and the search is **range-bounded to the window** (a near-horizon pixel can't
+   smear past the window edge). `project_obstacle_pixels` stays unchanged for its other consumer
+   `segments_to_pointcloud.cpp` (reflex feed). **z=0 is correct here** (floating boat; `map_tide` z=0
+   tracks the surface — #10 H non-issue). Add a per-camera **FOV frustum cull** so iterating window
+   cells × cameras stays cheap at ~10 Hz × 4 cameras.
+
+   > **Regression caught 2026-05-27 — this phase must change.** The first phase-3 implementation
+   > (`f10666c`) drifted to **forward** per-pixel projection (`project_observations`: each pixel → one
+   > world point → one cell), despite this phase's "inverted projection / #10-I loop-inversion" intent.
+   > Forward leaves **gaps** at range, makes **lone jittery hits** that never reach the 2-hit lethal
+   > threshold, and forward-projects near-horizon pixels to far cells (the speckle "ring"). Offline A/B
+   > on the 2026-05-26 bag (episode #21, 2.0 m/s approach→STOP) measured **forward 0.1 % lethal vs
+   > inverse 3.2 %** (live fused costmap 6.8 %); inverse produces a coherent obstacle footprint that
+   > tracks the live costmap through the maneuver while forward stays incoherent speckle. **Fix: restore
+   > inverse projection feeding the buffer**, keeping contact-only marking (the shadow fix lived in the
+   > inverse loop in `fe337f6`, so both are compatible). Verified offline by the `bag_to_costmap_video`
+   > forward-vs-inverse mosaic before the boat. **Note:** the layer **currently deployed on bizzy**
+   > (4 instances, pre-#19, via the bizzy overlay) is **inverse**, so the live costmap in the A/B already
+   > reflects inverse segmentation — the forward rewrite would regress vs the behaviour running today.
 4. **Multi-source subscriptions (consolidate 4→1)** — accept a list of camera sources (segmentation +
    camera_info + per-source `maximum_range`); all feed the one shared world-frame buffer (so an obstacle
    reinforces the same cell across cameras — the handoff fix). A single source remains valid (back-compat).
@@ -80,19 +98,51 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
    `nav2_params.yaml` migration (4 blocks → 1 multi-source) **is the PR that finalizes #19**, since it
    activates cross-camera fusion and is where the handoff AC is verified (bag/sim). Note IzzyBoat parity.
 
+## Global-costmap propagation — planner buoy-avoidance (new, 2026-05-27)
+
+**Problem surfaced during the #21 review.** The controller (`marine_nav_crabbing_path_follower::CrabbingPathFollower`)
+does **not** consult the costmap, and the global planner (`SmacPlannerHybrid`) plans on the **global**
+costmap — which carries charted obstacles (`s57_layer`) + inflation but **no segmentation**. So an
+uncharted buoy the cameras detect never reaches the planner; today the local costmap (where the
+sea-surface layer lives) is effectively **operator-display-only** for planning. For the planner to route
+around buoys, the detection must reach the **global** costmap. (`local_costmap` and `global_costmap` are
+separate `Costmap2DROS` instances — in `controller_server` and `planner_server` — with independent layer
+plugin instances; a layer in one is not in the other.)
+
+**Decision — publish-and-relay (mirrors the existing S57 producer/consumer pattern).** `s57_grids`
+already produces chart `grid_map`s once and both costmaps' `s57_layer` instances subscribe; copy that:
+- The local `SeaSurfaceLayer` **publishes its own contribution** (the grid_map log-odds buffer,
+  thresholded) on a dedicated topic — cheap, since the buffer is already a `grid_map::GridMap`. It must
+  publish the **layer's contribution, NOT the fused local master** (that would double-count `s57_layer`
+  and import local's 150 m inflation into global).
+- A new **thin `SeaSurfaceRelayLayer`** (subscribe-and-rasterize, like `s57_layer` minus dataset
+  discovery) is added to the **global** costmap, ordered **before** `inflation_layer` so the planner
+  inflates the buoys. (Stock `nav2_costmap_2d::StaticLayer` composes poorly with a **rolling** global
+  costmap — `global_costmap` is `rolling_window: true` — so a small custom relay layer is safer.)
+- Projection + persistence run **once** (in the local layer); both costmaps consume the result. No
+  second projection, no second buffer.
+
+**Tradeoff (accepted).** The producer is coupled to `controller_server`'s lifecycle (restart → global
+loses buoys until republish). Promotable to a standalone producer node later (full S57-style split)
+without changing the relay side.
+
+**Scope.** This is **new work beyond the original #19 split** and is cross-repo (new relay layer here +
+global-costmap config in seafloor), but **all tracked under #19** (decided 2026-05-27 — no separate issue).
+
 ## Files to Change
 
 | File | Change |
 |------|--------|
-| `sea_surface_segmentation/src/sea_surface_layer.cpp` | Rewrite: multi-source subs, shared log-odds buffer as a `grid_map` float layer rolled via `move()` and converted to the master via `grid_map_costmap_2d`, inverted projection w/ waterline-contact + free-space-miss + occlusion, decay, thread-safe, validating param callback, `isClearable()` revisit |
+| `sea_surface_segmentation/src/sea_surface_layer.cpp` | Rewrite: multi-source subs, shared log-odds buffer as a `grid_map` float layer rolled via `move()` and converted to the master via `grid_map_costmap_2d`, **INVERSE (cell→pixel)** projection w/ waterline-contact + free-space-miss + occlusion + FOV frustum cull, decay, thread-safe, validating param callback, `isClearable()` revisit, **publish the buffer's contribution as a `grid_map`/`OccupancyGrid` topic** (for the global relay) |
 | `sea_surface_segmentation/src/occupancy_buffer.hpp` | New pure log-odds update math (hit/miss/decay/threshold) over a grid_map layer; grid_map owns storage + rolling |
-| `sea_surface_segmentation/src/segments_projection.hpp` | `is_waterline_contact_pixel` (done) + **new** contact-only / free-space-miss projection helper; do NOT repurpose `project_obstacle_pixels` (shared with `segments_to_pointcloud.cpp`) |
+| `sea_surface_segmentation/src/segments_projection.hpp` | `is_waterline_contact_pixel` + per-column contact map (image-space primitives the inverse loop samples); do NOT repurpose `project_obstacle_pixels` (shared with `segments_to_pointcloud.cpp`). **Drop the forward `project_observations` from the layer's path** (keep/relocate any reuse for the offline tool) |
+| `sea_surface_segmentation/` — new `SeaSurfaceRelayLayer` | New thin costmap layer: subscribe to the published contribution grid and rasterize into the costmap. Added to the **global** costmap before inflation. Mirrors `s57_layer`'s subscribe-and-rasterize. |
 | `sea_surface_segmentation/package.xml` | Add deps: `grid_map_core`, `grid_map_ros`, `grid_map_costmap_2d` (rosdep-resolvable; already a workspace dep via camp) |
 | `sea_surface_segmentation/test/test_occupancy_buffer.cpp` | New: log-odds + decay + `grid_map::move()` fractional-shift persistence tests |
 | `sea_surface_segmentation/test/test_segments_projection.cpp` | Waterline tests (done) + contact/miss/occlusion + fusion cases |
 | `sea_surface_segmentation/CMakeLists.txt` | `find_package(grid_map_*)` + link; register new test |
 | `sea_surface_segmentation/README*` / params doc | Document sources, decay, thresholds, runtime-tunable params |
-| seafloor `echoboat_project11/config/nav2_params.yaml` *(follow-up PR — finalizes #19)* | 4 instances → 1 multi-source block (local_costmap only; global_costmap doesn't use the layer) |
+| seafloor / bizzy instance config *(follow-up PR — finalizes #19)* | The 4 `SeaSurfaceLayer` instances are **already live** in bizzy's local costmap via `unh_echoboats_project11/bizzyboat_project11/config/nav2_overlay.yaml` (re-enabled by seafloor **#18, closed** — running the pre-#19 **inverse** code). Migrate local: 4 instances → 1 multi-source `SeaSurfaceLayer`. Add `SeaSurfaceRelayLayer` to the **global** costmap (before `inflation_layer`) — gets buoys in front of the planner. Note IzzyBoat parity. |
 
 ## Principles Self-Check
 
@@ -124,6 +174,9 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
 | The layer | package README / param docs | Yes |
 | Layer logic | regression tests (#10 L) | Yes |
 | (reconcile #10) | D, I, E/F, L addressed; **H = non-issue for a floating platform** (note on #10, no code change) | Note in PR + comment on #10 |
+| Layer publishes its contribution | new topic; `SeaSurfaceRelayLayer` consumes it in the **global** costmap (before inflation) | New scope (publish-and-relay) |
+| Global costmap gains buoys | seafloor `nav2_params.yaml` **global_costmap** plugins (+relay layer); planner now routes around detections | Cross-repo (seafloor) |
+| Producer coupled to `controller_server` | if it restarts, global loses buoys until republish; promote to standalone node if it bites | Accepted tradeoff |
 
 ## Open Questions
 
@@ -133,7 +186,15 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
 - **#10 H tide z-drift — RESOLVED** (2026-05-27): non-issue for a floating boat (z=0 = water surface,
   tracked by `map_tide`); no `plane_z` work needed; leave a note on #10.
 - **Default tuning** — decay half-life, hit/miss increments, lethal threshold: propose conservative
-  defaults, tune on water (non-blocking).
+  defaults, tune on water (non-blocking). Revisit *after* the inverse-projection fix, not before.
+- **Projection direction — DECIDED: inverse (cell→pixel)** (2026-05-27). The committed forward
+  `project_observations` is a regression vs the pre-#19 inverse layer; offline A/B on the 2026-05-26
+  bag confirmed inverse fills footprints where forward leaves speckle. Phase 3 restores inverse.
+- **Buoys to the planner — DECIDED: publish-and-relay** (2026-05-27). Local `SeaSurfaceLayer` publishes
+  its contribution; a thin `SeaSurfaceRelayLayer` feeds the global costmap (before inflation). Producer
+  stays in-layer for now (coupled to `controller_server`); standalone node is a later option.
+- **Global relay scope — DECIDED: all in #19** (2026-05-27, user). No separate issue; the relay layer +
+  seafloor global config land under #19 alongside the inverse fix and local migration.
 
 ## Implementation Notes
 
@@ -145,13 +206,21 @@ config-migration PR activates cross-camera fusion, verifies the handoff AC on ba
   `${grid_map_core_INCLUDE_DIRS}` var is empty under the modern target export; pull the path from the
   imported target (`get_target_property(... INTERFACE_INCLUDE_DIRECTORIES)`) and `include_directories()`
   it globally. The layer-integration phase must keep this.
-- **Free-space clearing (phase 3):** chose **water-pixel-as-free** (`miss` at the ground point of each
-  segmented water pixel) over an explicit camera→contact Bresenham raytrace. It's more conservative —
-  it only clears cells the camera *positively observes as water*, not every cell along the ray
-  (which would clear unobserved cells too) — and falls out of the same per-pixel back-projection loop.
-- **Layer verification (phase 3):** the buffer and `project_observations` are unit-tested; the live
-  layer wiring (TF→pose, rolling, threshold-to-master) is verified by the bag→costmap→video utility
-  (see #19 follow-up) on the 2026-05-26 bag before the boat — the layer itself has no unit test.
+- **Free-space clearing (phase 3):** **water-as-free** — a cell that projects to a water pixel gets a
+  `miss`. Conservative (only clears cells the camera *positively observes as water*, not whole rays),
+  and in the inverse loop it falls out of the same per-cell classification as the hit/occlusion cases.
+- **Layer verification (phase 3):** the buffer is unit-tested; the live layer wiring (TF→pose, rolling,
+  projection, threshold-to-master) is verified offline by the `bag_to_costmap_video` tool. Today it
+  renders a two-row mosaic — top: 4 segmentation tiles (port·fwd·stbd·aft); bottom: live boat costmap |
+  OURS (inverse). An earlier four-panel version added a NEW-forward panel for the A/B that surfaced the
+  forward-projection regression on the 2026-05-26 bag (episode #21); the forward panel has been dropped
+  since the A/B is settled, but the diff lives in git history if it ever needs reproducing. The forward
+  `project_observations` still exists in `segments_projection.hpp` for the reflex-pointcloud consumer;
+  it will be removed from the layer's projection path in the phase-3 implementation commit. The layer
+  itself has no unit test, so this offline render is the gate before the boat.
+- **Inverse cost (phase 3):** iterating window cells × cameras is heavier than forward per-pixel; bound
+  it with an early behind-camera reject + a per-camera FOV frustum cull. The buffer window (±half-extent)
+  naturally caps range, so the far-horizon speckle ring cannot form.
 
 ## Estimated Scope
 
@@ -160,3 +229,10 @@ This perception PR (atomic commits per phase, each buildable + single-source-cor
 + `move()`-rolling + fractional-shift test) is the core, independently reviewable piece — de-risked by
 leaning on grid_map rather than hand-rolled buffer math. If the single perception PR proves unwieldy in
 review, split phase 1 out first. Bookkeeping handled here; no per-ticket overhead for the user.
+
+**Added 2026-05-27:** phase 3 now restores **inverse** projection (was a forward-projection regression),
+and the **global-costmap propagation** (publish-and-relay: layer publisher + `SeaSurfaceRelayLayer`) is
+new, cross-repo scope (with seafloor) **but all tracked under #19** — no separate issue. The
+`bag_to_costmap_video` offline tool is the verification harness; it now ships the inverse-only mosaic
+(forward A/B is settled and dropped from the tool — diff in git history). Sibling diagnostic tracked
+separately as [#21](https://github.com/rolker/unh_marine_perception/issues/21).
