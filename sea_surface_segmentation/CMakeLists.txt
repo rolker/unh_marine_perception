@@ -26,6 +26,7 @@ find_package(grid_map_core REQUIRED)
 get_target_property(grid_map_core_INC grid_map_core::grid_map_core INTERFACE_INCLUDE_DIRECTORIES)
 include_directories(${grid_map_core_INC})
 find_package(lifecycle_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
@@ -81,6 +82,7 @@ install(TARGETS segments_to_pointcloud
 
 add_library("sea_surface_layer" SHARED
   src/sea_surface_layer.cpp
+  src/sea_surface_relay_layer.cpp
 )
 add_library("sea_surface_layer::sea_surface_layer" ALIAS "sea_surface_layer")
 
@@ -90,6 +92,7 @@ target_link_libraries(sea_surface_layer
   nav2_costmap_2d::nav2_costmap_2d_core
   rclcpp::rclcpp
   tf2_ros::tf2_ros
+  ${nav_msgs_TARGETS}
 )
 
 ament_target_dependencies(sea_surface_layer
