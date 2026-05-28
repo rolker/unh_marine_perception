@@ -158,65 +158,8 @@ cv::Mat render_live(const nav_msgs::msg::OccupancyGrid & grid, bool have_grid,
   return panel;
 }
 
-// PROTOTYPE — inverse (ground-up) projection, for A/B comparison against the
-// forward `project_observations`. Instead of mapping each image pixel to one cell,
-// it iterates the world cells in the boat-centred window and asks "which pixel
-// covers this cell?", so a single large/distant pixel fills EVERY cell in its
-// footprint (no gaps) and the search is naturally range-bounded to the window
-// (a near-horizon pixel can't smear past the window edge). Same contact-only
-// classification as the forward path: a cell that projects to its column's
-// waterline-contact pixel → obstacle; to water → free; to an above-contact body
-// pixel → skipped (occluded/unknown). Lives in the tool, not the shared header —
-// this is a comparison probe, not (yet) the layer's path.
-std::vector<sea_surface_segmentation::OccupancyObservation> project_observations_inverse(
-  const cv::Mat & mask, const image_geometry::PinholeCameraModel & cam,
-  const cv::Vec3d & cam_origin, const cv::Matx33d & rot_cam_to_world,
-  double max_range, double bx, double by, double res, double half_extent, double plane_z = 0.0)
-{
-  // Lowest (nearest) waterline contact per column — same primitive as forward.
-  std::vector<int> contact_row(mask.cols, -1);
-  for (int col = 0; col < mask.cols; ++col) {
-    for (int row = mask.rows - 1; row >= 0; --row) {
-      if (sea_surface_segmentation::is_waterline_contact_pixel(mask, row, col)) {
-        contact_row[col] = row;
-        break;
-      }
-    }
-  }
-
-  const cv::Matx33d rot_world_to_cam = rot_cam_to_world.t();
-  std::vector<sea_surface_segmentation::OccupancyObservation> obs;
-  const int n = static_cast<int>(std::lround(2.0 * half_extent / res));
-  for (int iy = 0; iy < n; ++iy) {
-    for (int ix = 0; ix < n; ++ix) {
-      const double wx = bx + (ix - n / 2) * res;
-      const double wy = by + (iy - n / 2) * res;
-      const cv::Vec3d d(wx - cam_origin[0], wy - cam_origin[1], plane_z - cam_origin[2]);
-      if (std::sqrt(d.dot(d)) > max_range) { continue; }     // beyond sensor range
-      const cv::Vec3d pc = rot_world_to_cam * d;             // cell in camera optical frame
-      if (pc[2] <= 0.0) { continue; }                        // behind the camera
-      const cv::Point2d uv = cam.project3dToPixel(cv::Point3d(pc[0], pc[1], pc[2]));
-      const int u = static_cast<int>(std::lround(uv.x));
-      const int v = static_cast<int>(std::lround(uv.y));
-      if (u < 0 || u >= mask.cols || v < 0 || v >= mask.rows) { continue; }
-      const cv::Vec3b px = mask.at<cv::Vec3b>(v, u);
-      // Class channels (rgb8): R=obstacle prob, G=water prob, B=sky prob.
-      // Only positively-observed water marks the cell free; sky/ambiguous → skip
-      // (a ground cell on z=0 sampling a sky pixel is a geometric inconsistency,
-      // and clearing on it would erase legitimate hits from other frames/cameras).
-      if (sea_surface_segmentation::is_obstacle_pixel(px)) {
-        if (contact_row[u] >= 0 && v >= contact_row[u]) {
-          obs.push_back({wx, wy, true});                     // waterline contact → hit
-        }
-        // else: above the contact = occluded body → unobserved
-      } else if (px[1] > px[0] && px[1] > px[2]) {           // green-dominant = water
-        obs.push_back({wx, wy, false});                      // positively observed water → miss
-      }
-      // else: sky (blue-dominant) or ambiguous → skip (no observation)
-    }
-  }
-  return obs;
-}
+// (Inverse projection lives in segments_projection.hpp now — the layer and this
+// tool share one source of truth, see `project_observations_inverse`.)
 
 void label(cv::Mat & img, const std::string & text, cv::Point org, double scale = 0.5)
 {
@@ -409,8 +352,11 @@ int main(int argc, char ** argv)
       buffer.decay(stamp_s);
 
       // INVERSE (cell→pixel) projection — the corrected path; fills each pixel's footprint.
-      for (const auto & o : project_observations_inverse(
-          mask, model_it->second, camera_origin, rot, max_range, bx, by, res, half_extent, 0.0))
+      // Tool centres iteration on the boat (visualisation window); the live layer
+      // centres on the camera. Either is valid — the helper iterates a square AABB.
+      for (const auto & o : sea_surface_segmentation::project_observations_inverse(
+          mask, model_it->second, camera_origin, rot, max_range,
+          bx, by, res, half_extent, 0.0))
       {
         const grid_map::Position p(o.x, o.y);
         if (o.obstacle) { buffer.hit(p); } else { buffer.miss(p); }

@@ -16,6 +16,7 @@
 using sea_surface_segmentation::is_obstacle_pixel;
 using sea_surface_segmentation::is_waterline_contact_pixel;
 using sea_surface_segmentation::project_observations;
+using sea_surface_segmentation::project_observations_inverse;
 using sea_surface_segmentation::OccupancyObservation;
 using sea_surface_segmentation::project_obstacle_pixels;
 using sea_surface_segmentation::ProjectedPoint;
@@ -517,4 +518,71 @@ TEST(ProjectObservations, IsolatedContactIsObstacle)
   auto [obstacle, free] = count_obs(obs);
   EXPECT_EQ(obstacle, 1);
   EXPECT_EQ(free, 16 * 12 - 1);
+}
+
+// ---- project_observations_inverse: the per-cell→pixel classifier the layer uses
+//      (and the offline utility shares). Cell-iteration centred on (cx,cy);
+//      same contact-only marking + sky-skip semantics. ----
+
+// All-water mask → every in-footprint cell is missed (free); no obstacles.
+TEST(ProjectObservationsInverse, AllWaterAllMisses)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // green-dominant = water
+  const auto obs = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, /*cx=*/0.0, /*cy=*/0.0, /*res=*/0.2, /*half_extent=*/1.5);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_EQ(obstacle, 0);
+  EXPECT_GT(free, 0) << "every in-footprint cell should be classified as water-miss";
+}
+
+// All-sky mask → every cell projects to a sky pixel → SKIP (no obs), not miss.
+// The sky-as-miss bug would over-clear cells; sky-skip preserves them.
+TEST(ProjectObservationsInverse, AllSkyAllSkippedNotCleared)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 0, 200));  // blue-dominant = sky
+  const auto obs = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, /*cx=*/0.0, /*cy=*/0.0, /*res=*/0.2, /*half_extent=*/1.5);
+  EXPECT_TRUE(obs.empty()) << "sky-projecting cells must be skipped, not marked free";
+}
+
+// A column with a 2-px-tall obstacle above water: only cells projecting to the
+// contact row (lowest obstacle pixel) produce a hit; cells projecting to the
+// body pixel above are skipped (occluded); water cells around → miss.
+TEST(ProjectObservationsInverse, ContactCellHitsBodyCellsSkipped)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // water everywhere
+  // 2-tall obstacle in column 8: rows 5 (body) and 6 (contact), water row 7+.
+  mask.at<cv::Vec3b>(5, 8) = cv::Vec3b(200, 0, 0);
+  mask.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);
+  const auto obs = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, /*cx=*/0.0, /*cy=*/0.0, /*res=*/0.2, /*half_extent=*/1.5);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_GT(obstacle, 0) << "the contact cell must produce at least one hit";
+  EXPECT_GT(free, 0) << "water cells must still be missed";
+  // The body pixel above the contact is occluded; no cell should be flagged as
+  // obstacle there. Verify by ensuring obstacle count is bounded — the contact
+  // is one pixel, so only cells projecting to that one pixel become hits.
+  EXPECT_LE(obstacle, 4) << "only the contact-pixel's cell footprint is hit, not the body's";
+}
+
+// Cells beyond max_range (even when in-image) are dropped by the Euclidean
+// range gate. With camera at z=2 and max_range=2.05, only the cells directly
+// under (slant distance ≈ 2.0–2.05 m) survive; an iteration covering several
+// metres horizontally should produce far fewer observations than the same
+// iteration with a generous range cap.
+TEST(ProjectObservationsInverse, MaxRangeDropsFarCells)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));
+  const auto loose = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, 0.0, 0.0, 0.2, 1.5);
+  const auto tight = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/2.05, 0.0, 0.0, 0.2, 1.5);
+  EXPECT_LT(tight.size(), loose.size())
+    << "tight max_range must drop far cells the loose range admits";
+  EXPECT_GT(tight.size(), 0u) << "near-overhead cells should still pass the tight gate";
 }

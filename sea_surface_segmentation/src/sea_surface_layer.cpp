@@ -19,10 +19,11 @@ namespace sea_surface_layer
 
 // Costmap layer that fuses camera segmentation into a persistent, decaying
 // log-odds occupancy buffer (see occupancy_buffer.hpp). Each segmentation frame
-// contributes ground-plane observations via project_observations (waterline
-// contact → obstacle, water → free, occluded body → skipped); the buffer
-// remembers obstacles through gaps and forgets them over time. Phase 1+3 of
-// #19; still single-source (multi-camera fusion is phase 4).
+// contributes ground-plane observations via `project_observations_inverse`
+// (iterate world cells in the camera's reach, classify each by the pixel it
+// covers: waterline contact → hit, water → miss, occluded body / sky → skip);
+// the buffer remembers obstacles through gaps and forgets them over time.
+// Phase 1+3 of #19; still single-source (multi-camera fusion is phase 4).
 class SeaSurfaceLayer: public nav2_costmap_2d::Layer
 {
 public:
@@ -179,15 +180,19 @@ private:
 
   void segmentsCallback(const sensor_msgs::msg::Image::SharedPtr segments_msg)
   {
-    // Pin the camera model under the lock, then project off-lock. cameraInfoCallback
-    // swaps in a *fresh* model (never mutates in place), so this local copy is an
-    // immutable snapshot — no torn read / use-after-free during projection.
+    // Pin the camera model + buffer geometry under the lock, then project off-lock.
+    // cameraInfoCallback swaps in a *fresh* model (never mutates in place), so this
+    // local copy is an immutable snapshot — no torn read / use-after-free during
+    // projection. `resolution_` is captured here too because matchSize() can update
+    // it from updateBounds(); reading it inside the off-lock projection would race.
     std::shared_ptr<image_geometry::PinholeCameraModel> camera_model;
+    double res;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       camera_model = camera_model_;
+      res = resolution_;
     }
-    if (!camera_model) {
+    if (!camera_model || res <= 0.0) {
       return;
     }
     try {
@@ -204,10 +209,17 @@ private:
       const cv::Matx33d rotation_cam_to_world =
         sea_surface_segmentation::rotation_matrix_from_quaternion(q.x, q.y, q.z, q.w);
 
-      // Water surface is z=0 in the tide-tracked global frame; the boat floats,
-      // so this holds at any tide (see #19 / #10 H discussion).
-      const auto observations = sea_surface_segmentation::project_observations(
-        image->image, *camera_model, camera_origin, rotation_cam_to_world, maximum_range_, 0.0);
+      // INVERSE (cell→pixel) projection — iterate the world cells this camera can
+      // reach (square AABB of half-width `maximum_range_` centred on the camera's
+      // XY) and classify each by the pixel it covers. Fills each pixel's full
+      // footprint (no gaps) and is naturally range-bounded. Water surface is z=0
+      // in the tide-tracked global frame; the boat floats, so this holds at any
+      // tide (see #19 / #10 H). Phase 3 of #19 restores the pre-#19 inverse
+      // direction; see the offline `bag_to_costmap_video` for the A/B that drove
+      // the change.
+      const auto observations = sea_surface_segmentation::project_observations_inverse(
+        image->image, *camera_model, camera_origin, rotation_cam_to_world,
+        maximum_range_, camera_origin[0], camera_origin[1], res, maximum_range_, 0.0);
 
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       if (!buffer_) {
