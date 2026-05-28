@@ -104,10 +104,17 @@ public:
     *max_y = std::max(*max_y, robot_y + maximum_range_);
 
     auto parent = layered_costmap_->getCostmap();
-    const bool geometry_changed =
-      parent->getSizeInCellsX() != count_x_ ||
-      parent->getSizeInCellsY() != count_y_ ||
-      parent->getResolution() != resolution_;
+    bool geometry_changed;
+    {
+      // count_x_/count_y_/resolution_ are written under costmap_mutex_ in
+      // matchSize(); read them under the same lock here so the geometry-change
+      // detection can't tear against a concurrent matchSize() invocation.
+      std::lock_guard<std::mutex> lock(costmap_mutex_);
+      geometry_changed =
+        parent->getSizeInCellsX() != count_x_ ||
+        parent->getSizeInCellsY() != count_y_ ||
+        parent->getResolution() != resolution_;
+    }
 
     if (geometry_changed) {
       matchSize();  // recreate the buffer at the new size/resolution (locks internally)
@@ -169,6 +176,23 @@ public:
       size_x, size_y, resolution_, parentCenter(parent), params_);
     RCLCPP_INFO_STREAM(
       logger_, "SeaSurfaceLayer occupancy buffer sized to " << count_x_ << "x" << count_y_);
+
+    // The projection AABB has half-extent = maximum_range_ centred on the
+    // camera; the buffer rolls with the parent costmap (half-extent ≈
+    // min(size_x, size_y) / 2). When the camera is centred in the buffer,
+    // observations past the buffer's half-extent project successfully but
+    // grid_map drops them at write time. Surface the mismatch so the operator
+    // can either raise the parent costmap size or lower maximum_range_; the
+    // layer doesn't silently clamp (would mis-report effective reach).
+    const double buffer_half_extent = std::min(size_x, size_y) / 2.0;
+    if (maximum_range_ > buffer_half_extent) {
+      RCLCPP_WARN_STREAM(
+        logger_,
+        "SeaSurfaceLayer maximum_range " << maximum_range_ << " m exceeds buffer "
+          "half-extent " << buffer_half_extent << " m (parent costmap " << size_x
+          << "x" << size_y << " m). Observations past the buffer edge will be "
+          "dropped; raise the costmap size or lower maximum_range.");
+    }
   }
 
 private:
@@ -220,6 +244,12 @@ private:
       // tide (see #19 / #10 H). Phase 3 of #19 restores the pre-#19 inverse
       // direction; see the offline `bag_to_costmap_video` for the A/B that drove
       // the change.
+      //
+      // TODO(#19, phase >5): the square AABB over-iterates by ~21% relative to
+      // the inscribed Euclidean range gate, and many cells project off-image or
+      // behind the camera. A per-camera FOV-cone cull (using the pinhole
+      // model's image bounds + the camera pose) would prune those before
+      // projection — meaningful CPU once we sustain N>1 cameras (phase 4).
       const auto observations = sea_surface_segmentation::project_observations_inverse(
         image->image, *camera_model, camera_origin, rotation_cam_to_world,
         maximum_range_, camera_origin[0], camera_origin[1], res, maximum_range_, 0.0);
@@ -236,8 +266,24 @@ private:
           buffer_->miss(p);
         }
       }
+      // Mark the layer current so LayeredCostmap::isCurrent() doesn't report a
+      // stale layer once a frame has been ingested. Stays true once set — the
+      // layer's persistence-and-decay semantics mean an unmodified buffer is
+      // still up-to-date (decay runs in updateBounds every cycle).
+      current_ = true;
     } catch (const std::exception & e) {
-      RCLCPP_WARN_STREAM(logger_, e.what());
+      if (auto node = node_.lock()) {
+        // Throttle: a stuck TF or wrong-encoding image floods at the
+        // segmentation publish rate (~5 Hz / camera × N cameras). Include the
+        // source frame and stamp so the log line is self-diagnostic.
+        auto clock = node->get_clock();
+        RCLCPP_WARN_THROTTLE(
+          logger_, *clock, 5000,
+          "SeaSurfaceLayer projection failed for %s @ %d.%09d: %s",
+          segments_msg->header.frame_id.c_str(),
+          segments_msg->header.stamp.sec, segments_msg->header.stamp.nanosec,
+          e.what());
+      }
     }
   }
 
