@@ -199,13 +199,43 @@ the #19 forward `project_observations` regresses vs the **inverse layer currentl
 - `tools/bag_to_costmap_video.cpp`: removed local copy; calls the shared helper. Smoke-render produced identical per-camera cell counts (5,848,135 / 6,404,148 / 5,306,146 / 6,096,452) before vs after the move.
 
 ### Findings (Claude Adversarial)
-- [ ] (suggestion, close-to-must-fix) **Test-coverage gap**: all 4 new tests are nadir + `cx=cy=cam_origin` + single-row stacks, so they don't exercise the production call shape (pitched cameras, `pc[2] ≤ 0` behind-camera reject, off-centre iteration, real occlusion). Add a pitched + off-centre integration test. — `test/test_segments_projection.cpp:528-588`
+- [x] (suggestion, close-to-must-fix) **Test-coverage gap**: all 4 new tests are nadir + `cx=cy=cam_origin` + single-row stacks, so they don't exercise the production call shape (pitched cameras, `pc[2] ≤ 0` behind-camera reject, off-centre iteration, real occlusion). Add a pitched + off-centre integration test. — `test/test_segments_projection.cpp:528-588` (addressed `e263a21`)
 - [ ] (suggestion) AABB half-extent = `maximum_range_` over-iterates by ~21% (corners exceed Euclidean gate); add a TODO at the call site for the eventual FOV cone cull. — `sea_surface_layer.cpp:222`
 - [ ] (suggestion) Unthrottled WARN on TF / cv_bridge failures — use `RCLCPP_WARN_THROTTLE` and include source frame_id + stamp. — `sea_surface_layer.cpp:236`
-- [ ] (suggestion, nit) `>=` vs `==` in contact classification — `==` matches forward helper's exact semantics. — `segments_projection.hpp:389`
-- [ ] (suggestion) Add `std::isfinite(uv.x/uv.y)` guard before `std::lround` int-narrowing; matches forward helper's defensive style. — `segments_projection.hpp:384`
+- [x] (suggestion, nit) `>=` vs `==` in contact classification — `==` matches forward helper's exact semantics. — `segments_projection.hpp:389` (addressed `939fd24`)
+- [x] (suggestion) Add `std::isfinite(uv.x/uv.y)` guard before `std::lround` int-narrowing; matches forward helper's defensive style. — `segments_projection.hpp:384` (addressed `939fd24`)
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-05-28 10:42 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+**Verdict**: approve
+
+**Branch**: feature/issue-19 (pre-push delta only — 3 commits vs `origin/feature/issue-19`)
+**Mode**: pre-push
+**Depth**: Standard (~82 lines insertions, 3 files, addresses outstanding Copilot inline review comments)
+**Tests**: 55 / 55 passing
+**Adversarial**: Claude sub-agent (fresh-context); Copilot to re-review post-push
+**Must-fix**: 0 | **Suggestions**: 1 (nit) | **Nits**: 0
+
+### Scope
+Addresses the 4 outstanding Copilot inline review comments on PR #20:
+
+- `9ca9407` — `sea_surface_layer.cpp`: add missing `<chrono>`, `<functional>`, `<mutex>`; `test_segments_projection.cpp`: add missing `<utility>` for `std::pair`. Compile-on-libstdc++-by-transitive-include → make explicit.
+- `939fd24` — `segments_projection.hpp::project_observations_inverse`: align contact classification with forward sibling (`v >= contact_row[u]` → `v == contact_row[u]`); add `std::isfinite(uv.x/uv.y)` guard before `std::lround`. Functionally equivalent against `is_waterline_contact_pixel` (the contact is the lowest obstacle pixel with water directly below OR an auto-contact at the image bottom; any obstacle pixel below the recorded contact would extend an unbroken column to the bottom and displace the recorded contact lower — `>` branch unreachable). Defensive consistency, not behavior change.
+- `e263a21` — `test_segments_projection.cpp`: new `PitchedOffCentreRejectsBehindAndOccludesBody` test. Camera at world (5, 3, 1.5) pitched 30° down looking +x, iteration centred at the camera's XY so the back half is behind. Asserts (a) zero behind-camera observations (pc[2]<=0 gate), (b) ≥1 contact-row hit under pitched optics, (c) observations cluster around camera XY (off-centre iteration), (d) every hit lands at x < 7.30 (contact-row reach + margin; body row 6 would land at x ≈ 7.60).
+
+### Findings (sub-agent)
+- Correctness of `==` equivalence claim verified by tracing `is_waterline_contact_pixel` and the contact-finding loop. The `contact_row[u] == -1` (no contact in column) case is also preserved: old form gated explicitly on `>= 0`; new form fails `v == -1` because `v ≥ 0` after the bounds check.
+- `isfinite` guard is genuinely defensive — `pc[2] > 0` plus a well-posed pinhole won't produce non-finite, but `lround` of non-finite is UB; cheap correctness improvement.
+- Pitched test bounds verified independently (contact ray hits at x ≈ 7.09; body row 6 / principal-point ray at x ≈ 7.60; `x < 7.30` exclusion ≈ 0.30 m on body side). Fails cleanly if `==` regresses to `>=` and body pixels start projecting.
+- All four added standard headers are actually used (`std::chrono::seconds`, `std::bind`/`placeholders`, `std::lock_guard<std::mutex>`, `std::pair`).
+
+- [ ] (suggestion, nit) Pitched test uses `EXPECT_LT` inside a per-observation loop; on regression, every offending observation fires its own message. `ASSERT_LT` would fail-fast and quiet the output. Style preference only; not addressed pre-push. — `test/test_segments_projection.cpp:670`
 
 ### Follow-ups (next session)
-- Resolve the 5 suggestions on the PR: highest-value is the test-coverage gap (a pitched + off-centre test that genuinely exercises the body-vs-contact occlusion + the `pc[2] ≤ 0` reject); the others (FOV-cone TODO, throttled WARN, `==` vs `>=` consistency, `isfinite` narrow guard) are small.
-- Triage the Copilot review GitHub posts overnight on PR #20.
+- Triage Copilot's post-push re-review on PR #20.
+- Phase 5 carry-ins: AABB FOV-cone TODO (`sea_surface_layer.cpp:222`), throttled WARN (`sea_surface_layer.cpp:236`), `current_` lifecycle, `maximum_range_` (100 m) vs buffer window mismatch, remaining `count_x_` race.
+- Phase 4 (multi-source consolidation), 6 (live-tunable param callback), 8 (docs + dependent seafloor config PR — the #19 finalizer).
+- New scope per offline review: `SeaSurfaceRelayLayer` global-costmap publish-and-relay (buoys don't reach the planner today — Smac sees only chart+inflation).
 - Sibling diagnostic issue [#21](https://github.com/rolker/unh_marine_perception/issues/21) (camera↔TF motion-consistency tool) remains captured but unimplemented.
