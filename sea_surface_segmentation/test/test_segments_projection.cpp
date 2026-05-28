@@ -588,6 +588,50 @@ TEST(ProjectObservationsInverse, MaxRangeDropsFarCells)
   EXPECT_GT(tight.size(), 0u) << "near-overhead cells should still pass the tight gate";
 }
 
+// Minimum grazing angle cuts off rays that hit the water plane too shallowly.
+// At camera height h, a min-grazing angle of θ enforces max horizontal range
+// ≈ h / tan(θ). Use a nadir camera so all rays straight down have grazing 90°
+// (every cell passes any cutoff < 90°), then a pitched camera so the cutoff
+// actually starts dropping cells at the expected horizontal range.
+TEST(ProjectObservationsInverse, MinGrazingAngleDropsShallowRays)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // water everywhere
+
+  // Pitched 30°, camera at 1.5 m, iteration centred at camera XY out to 50 m.
+  // No grazing cutoff: many cells observed.
+  image_geometry::PinholeCameraModel cam;
+  cam.fromCameraInfo(make_pinhole_info(160, 120, 100.0, 100.0));  // larger img so more rays land in-image
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.5);
+  const auto rotation = pitched_rotation(30.0);
+
+  const auto loose = project_observations_inverse(
+    mask, cam, camera_origin, rotation,
+    /*max_range=*/100.0, /*cx=*/10.0, /*cy=*/0.0, /*res=*/0.5,
+    /*half_extent=*/15.0, /*plane_z=*/0.0, /*min_grazing_angle_deg=*/0.0);
+
+  // Tight grazing cutoff at 30° → max horizontal range = 1.5 / tan(30°) = 2.6 m.
+  // Cells beyond ~2.6 m horizontal (from the camera at origin) must drop.
+  const auto tight = project_observations_inverse(
+    mask, cam, camera_origin, rotation,
+    /*max_range=*/100.0, /*cx=*/10.0, /*cy=*/0.0, /*res=*/0.5,
+    /*half_extent=*/15.0, /*plane_z=*/0.0, /*min_grazing_angle_deg=*/30.0);
+
+  ASSERT_GT(loose.size(), 0u);
+  EXPECT_LT(tight.size(), loose.size())
+    << "min_grazing_angle_deg must drop shallow-grazing cells";
+
+  // Every cell that survives the tight cutoff must hit the water plane at >= 30°.
+  // For a cell at (x, y, 0) viewed from (0, 0, 1.5), grazing angle is
+  // atan(1.5 / sqrt(x*x + y*y)). 30° → sqrt(x*x + y*y) <= 1.5 / tan(30°) ≈ 2.598.
+  const double max_horiz = 1.5 / std::tan(30.0 * M_PI / 180.0);
+  for (const auto & o : tight) {
+    const double horiz = std::sqrt(o.x * o.x + o.y * o.y);
+    EXPECT_LE(horiz, max_horiz + 1e-6)
+      << "cell at horizontal range " << horiz << " exceeds grazing-30° reach "
+      << max_horiz << " — cutoff is wrong";
+  }
+}
+
 // Pitched, off-centre camera — the production call shape. Exercises three gaps
 // in the nadir tests: (a) off-centre iteration (cx,cy = camera XY, not 0), (b)
 // the pc[2] <= 0 behind-camera reject, (c) body-vs-contact occlusion under

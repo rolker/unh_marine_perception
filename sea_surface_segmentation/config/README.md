@@ -140,6 +140,7 @@ fewer flicker losses) and persists across FOV handoffs.
 | `segmentation_topic` | string | `"segmentation"` | no | Legacy single-source (when `observation_sources` is empty). |
 | `camera_info_topic` | string | `"camera_info"` | no | Legacy single-source. |
 | `maximum_range` | double | `100.0` | **yes** | Projection AABB half-extent per camera (m). |
+| `min_grazing_angle_deg` | double | `0.0` | **yes** | Reject rays that hit the water plane at less than this angle from horizontal. `0` = filter off. Bounds horizontal reach to ≈ `camera_height / tan(angle)`; cuts long-range noise where small pitch uncertainty produces large ground error. |
 | `published_topic` | string | `""` | no | When non-empty, republishes the lethal mask on this topic for `SeaSurfaceRelayLayer`. Empty = disabled. |
 | `hit_log_odds` | double | `0.85` | **yes** | Log-odds added on a waterline-contact observation. |
 | `miss_log_odds` | double | `-0.40` | **yes** | Log-odds added on a water (free-space) observation; negative. |

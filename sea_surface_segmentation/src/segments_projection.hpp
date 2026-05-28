@@ -356,7 +356,8 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
   const cv::Matx33d & rotation_cam_to_target,
   double max_range,
   double cx, double cy, double res, double half_extent,
-  double plane_z = 0.0)
+  double plane_z = 0.0,
+  double min_grazing_angle_deg = 0.0)
 {
   // Lowest (nearest) waterline contact per column — same primitive as forward.
   std::vector<int> contact_row(mask_rgb8.cols, -1);
@@ -369,6 +370,15 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
     }
   }
 
+  // Grazing-angle cutoff: reject rays where |dz| / |d| < sin(min_grazing) —
+  // i.e. rays that hit the water plane at less than the configured angle from
+  // horizontal. Squared form avoids the per-cell sqrt: |dz|^2 >= s^2 * |d|^2
+  // (both sides non-negative, squaring preserves the inequality). A camera at
+  // height h enforces max horizontal range ≈ h / tan(min_grazing): at h=1.5 m
+  // and 5°, that's ~17 m; at 2°, ~43 m. Default 0° = no filter (back-compat).
+  const double min_grazing_sin = std::sin(min_grazing_angle_deg * M_PI / 180.0);
+  const double min_grazing_sin_sq = min_grazing_sin * min_grazing_sin;
+
   const cv::Matx33d rotation_target_to_cam = rotation_cam_to_target.t();
   std::vector<OccupancyObservation> observations;
   const int n = static_cast<int>(std::lround(2.0 * half_extent / res));
@@ -377,7 +387,11 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
       const double wx = cx + (ix - n / 2) * res;
       const double wy = cy + (iy - n / 2) * res;
       const cv::Vec3d d(wx - camera_origin[0], wy - camera_origin[1], plane_z - camera_origin[2]);
-      if (std::sqrt(d.dot(d)) > max_range) { continue; }  // beyond sensor range
+      const double range_sq = d.dot(d);
+      if (range_sq > max_range * max_range) { continue; }  // beyond sensor range
+      if (min_grazing_sin > 0.0 && d[2] * d[2] < min_grazing_sin_sq * range_sq) {
+        continue;  // ray strikes water plane too shallowly — high ground-error per pitch arc-sec
+      }
       const cv::Vec3d pc = rotation_target_to_cam * d;    // cell in camera optical frame
       if (pc[2] <= 0.0) { continue; }                     // behind the camera (+z forward)
       const cv::Point2d uv = camera_model.project3dToPixel(cv::Point3d(pc[0], pc[1], pc[2]));

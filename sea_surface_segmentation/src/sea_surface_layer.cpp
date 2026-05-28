@@ -71,6 +71,23 @@ public:
     declareParameter("maximum_range", rclcpp::ParameterValue(maximum_range_));
     node->get_parameter(name_ + ".maximum_range", maximum_range_);
 
+    // Reject rays whose grazing angle to the water plane is below this — they
+    // back-project to large ground errors per arc-second of pitch and dominate
+    // long-range noise. Camera height bounds the cut: a camera at height h
+    // enforces max horizontal reach ≈ h / tan(min_grazing). Default 0 = off.
+    declareParameter(
+      "min_grazing_angle_deg", rclcpp::ParameterValue(min_grazing_angle_deg_));
+    node->get_parameter(name_ + ".min_grazing_angle_deg", min_grazing_angle_deg_);
+    if (!std::isfinite(min_grazing_angle_deg_) ||
+      min_grazing_angle_deg_ < 0.0 || min_grazing_angle_deg_ >= 90.0)
+    {
+      RCLCPP_WARN_STREAM(
+        logger_,
+        "Invalid min_grazing_angle_deg (" << min_grazing_angle_deg_
+          << "); must be in [0, 90). Using 0 (filter off).");
+      min_grazing_angle_deg_ = 0.0;
+    }
+
     // Log-odds occupancy parameters (runtime-tunable wiring is phase 6).
     declareParameter("hit_log_odds", rclcpp::ParameterValue(params_.hit_log_odds));
     node->get_parameter(name_ + ".hit_log_odds", params_.hit_log_odds);
@@ -327,10 +344,14 @@ private:
     // from updateBounds(); reading it inside the off-lock projection would race.
     std::shared_ptr<image_geometry::PinholeCameraModel> camera_model;
     double res;
+    double maximum_range;
+    double min_grazing_deg;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       camera_model = src.camera_model;
       res = resolution_;
+      maximum_range = maximum_range_;
+      min_grazing_deg = min_grazing_angle_deg_;
     }
     if (!camera_model || res <= 0.0) {
       return;
@@ -365,7 +386,8 @@ private:
       // projection — meaningful CPU once we sustain N>1 cameras (phase 4).
       const auto observations = sea_surface_segmentation::project_observations_inverse(
         image->image, *camera_model, camera_origin, rotation_cam_to_world,
-        maximum_range_, camera_origin[0], camera_origin[1], res, maximum_range_, 0.0);
+        maximum_range, camera_origin[0], camera_origin[1], res, maximum_range,
+        /*plane_z=*/0.0, min_grazing_deg);
 
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       if (!buffer_) {
@@ -507,10 +529,12 @@ private:
 
     sea_surface_segmentation::OccupancyParams candidate_occ;
     double candidate_max_range;
+    double candidate_min_grazing_deg;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       candidate_occ = params_;
       candidate_max_range = maximum_range_;
+      candidate_min_grazing_deg = min_grazing_angle_deg_;
     }
 
     // Configure-time params — subscriber re-bind / publisher re-bind isn't
@@ -572,6 +596,14 @@ private:
             return result;
           }
           candidate_max_range = v;
+        } else if (n == name_ + ".min_grazing_angle_deg") {
+          const double v = p.as_double();
+          if (!std::isfinite(v) || v < 0.0 || v >= 90.0) {
+            result.successful = false;
+            result.reason = "min_grazing_angle_deg must be finite and in [0, 90)";
+            return result;
+          }
+          candidate_min_grazing_deg = v;
         }
       }
     } catch (const rclcpp::exceptions::InvalidParameterTypeException & e) {
@@ -590,6 +622,7 @@ private:
     std::lock_guard<std::mutex> lock(costmap_mutex_);
     params_ = candidate_occ;
     maximum_range_ = candidate_max_range;
+    min_grazing_angle_deg_ = candidate_min_grazing_deg;
     if (buffer_) {
       buffer_->setParams(params_);
     }
@@ -607,6 +640,7 @@ private:
   unsigned int count_y_ = 0;
 
   double maximum_range_ = 100.0;
+  double min_grazing_angle_deg_ = 0.0;  // 0 = filter off (back-compat)
   sea_surface_segmentation::OccupancyParams params_;
   std::unique_ptr<sea_surface_segmentation::OccupancyBuffer> buffer_;
 
