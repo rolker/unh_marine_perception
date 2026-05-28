@@ -2,4 +2,7 @@
   <class type="sea_surface_layer::SeaSurfaceLayer" base_class_type="nav2_costmap_2d::Layer">
     <description>A sea surface segmentation layer for costmap_2d</description>
   </class>
+  <class type="sea_surface_layer::SeaSurfaceRelayLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>Relay layer that stamps lethal cells published by a peer SeaSurfaceLayer (typically in local_costmap) into a different costmap (typically global_costmap), so the segmentation projection runs only once but reaches both planners.</description>
+  </class>
 </library>

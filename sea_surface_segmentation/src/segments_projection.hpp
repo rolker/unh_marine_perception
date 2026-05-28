@@ -46,6 +46,36 @@ inline bool is_obstacle_pixel(const cv::Vec3b & pixel)
   return pixel[0] > pixel[1] && pixel[0] > pixel[2];
 }
 
+// True if an obstacle pixel is a "waterline contact" — the point where an
+// obstacle meets the water surface — rather than part of the obstacle's body
+// sticking up out of the water.
+//
+// An obstacle pixel is a contact iff the pixel directly below it is water
+// (non-obstacle), or it sits on the bottom image row (nothing below to
+// disqualify it — the nearest possible return for that bearing). Pixels with
+// more obstacle below them are the object's body.
+//
+// Why it matters: the costmap layer back-projects every obstacle pixel onto
+// the z=0 water plane. That assumption holds only at the waterline; an
+// above-water body pixel back-projects far beyond the real obstacle, smearing
+// a false radial "shadow" of lethal cells out toward maximum_range. Only the
+// contact is a trustworthy footprint; the region the body occludes should be
+// left unknown (NO_INFORMATION), not marked lethal. Callers use this to mark
+// the contact lethal and skip the rest.
+inline bool is_waterline_contact_pixel(const cv::Mat & mask, int row, int col)
+{
+  if (row < 0 || col < 0 || row >= mask.rows || col >= mask.cols) {
+    return false;  // defensive: out-of-range never a contact
+  }
+  if (!is_obstacle_pixel(mask.at<cv::Vec3b>(row, col))) {
+    return false;
+  }
+  if (row + 1 >= mask.rows) {
+    return true;  // bottom image row: nearest possible return for this bearing
+  }
+  return !is_obstacle_pixel(mask.at<cv::Vec3b>(row + 1, col));
+}
+
 // Convert a quaternion (x, y, z, w) into the 3×3 rotation matrix that maps
 // a direction in the camera optical frame to the target frame — i.e. the
 // `rotation_cam_to_target` argument of `project_obstacle_pixels`. The input
@@ -207,6 +237,181 @@ inline std::vector<ProjectedPoint> project_obstacle_pixels(
   }
 
   return points;
+}
+
+// A ground-plane occupancy observation produced from one segmentation pixel:
+// a world (x, y) point on the plane `z = plane_z`, and whether it is an
+// obstacle (a waterline contact) or free water.
+struct OccupancyObservation
+{
+  double x;
+  double y;
+  bool obstacle;
+};
+
+// Back-project a segmentation mask into ground-plane occupancy observations for
+// the rolling log-odds buffer. This is the shared per-frame logic used by BOTH
+// the costmap layer and the offline bag→costmap utility, so they produce
+// identical results.
+//
+// Per image COLUMN, the lowest obstacle pixel with water directly below is the
+// waterline contact (`is_waterline_contact_pixel`) → one **obstacle**
+// observation at its ground intersection. Obstacle pixels above the contact are
+// the object's body: occluded, so they are skipped (not projected — this is the
+// shadow fix). Water pixels → **free** observations (the camera positively sees
+// water there). Rays that miss the plane (parallel / point away) or land beyond
+// `max_range` are dropped (same geometry as `project_obstacle_pixels`).
+//
+// Pure logic: no ROS/TF. The caller supplies the camera pose in the target
+// (world) frame via `camera_origin` + `rotation_cam_to_target` and applies each
+// observation to the buffer (obstacle → hit, free → miss).
+inline std::vector<OccupancyObservation> project_observations(
+  const cv::Mat & mask_rgb8,
+  const image_geometry::PinholeCameraModel & camera_model,
+  const cv::Vec3d & camera_origin,
+  const cv::Matx33d & rotation_cam_to_target,
+  double max_range,
+  double plane_z = 0.0)
+{
+  std::vector<OccupancyObservation> observations;
+
+  for (int col = 0; col < mask_rgb8.cols; ++col) {
+    // Lowest (nearest) waterline contact in this column, scanning up from the
+    // bottom. -1 if the column has no obstacle-over-water transition.
+    int contact_row = -1;
+    for (int row = mask_rgb8.rows - 1; row >= 0; --row) {
+      if (is_waterline_contact_pixel(mask_rgb8, row, col)) {
+        contact_row = row;
+        break;
+      }
+    }
+
+    for (int row = 0; row < mask_rgb8.rows; ++row) {
+      const cv::Vec3b pixel_value = mask_rgb8.at<cv::Vec3b>(row, col);
+      bool obstacle_obs;
+      if (is_obstacle_pixel(pixel_value)) {
+        if (row != contact_row) {
+          continue;  // occluded body above the waterline contact — skip
+        }
+        obstacle_obs = true;  // the waterline contact itself
+      } else {
+        obstacle_obs = false;  // water → free observation
+      }
+
+      // Ray → plane intersection in the target frame (cf. project_obstacle_pixels).
+      const cv::Point3d ray_cam = camera_model.projectPixelTo3dRay(cv::Point2d(col, row));
+      const cv::Vec3d ray_target = rotation_cam_to_target *
+        cv::Vec3d(ray_cam.x, ray_cam.y, ray_cam.z);
+      if (!std::isfinite(ray_target[0]) || !std::isfinite(ray_target[1]) ||
+        !std::isfinite(ray_target[2]) || ray_target[2] == 0.0)
+      {
+        continue;
+      }
+      const double u = (plane_z - camera_origin[2]) / ray_target[2];
+      if (!std::isfinite(u) || u <= 0.0) {
+        continue;  // ray parallel to / behind the plane
+      }
+      const double wx = camera_origin[0] + u * ray_target[0];
+      const double wy = camera_origin[1] + u * ray_target[1];
+      if (!std::isfinite(wx) || !std::isfinite(wy)) {
+        continue;
+      }
+      const double dx = wx - camera_origin[0];
+      const double dy = wy - camera_origin[1];
+      const double dz = plane_z - camera_origin[2];
+      if (std::sqrt(dx * dx + dy * dy + dz * dz) > max_range) {
+        continue;  // beyond sensor range
+      }
+      observations.push_back({wx, wy, obstacle_obs});
+    }
+  }
+
+  return observations;
+}
+
+// INVERSE (cell→pixel) ground-plane projection — sibling to `project_observations`.
+// Instead of iterating image pixels and back-projecting each to one world cell, this
+// iterates world cells in an axis-aligned window centred on (cx, cy) and asks
+// "which pixel covers this cell?". One large/distant pixel fills EVERY cell its
+// ray covers (no gaps), and iteration is naturally range-bounded to the window
+// (a near-horizon pixel can't smear past the window edge).
+//
+// Pixel classification (rgb8 channels: R=obstacle, G=water, B=sky):
+//   - obstacle pixel that is the column's waterline contact → hit
+//   - obstacle pixel above the contact (occluded body) → skip (unobserved)
+//   - water pixel (green-dominant) → miss (positively observed free)
+//   - sky pixel (blue-dominant) or ambiguous → skip (a ground cell on z=0 sampling
+//     a sky pixel is a geometric inconsistency; clearing on it would erase
+//     legitimate hits from other frames / cameras)
+//
+// Pure logic: no ROS/TF. Caller supplies the camera pose in the target (world)
+// frame via `camera_origin` + `rotation_cam_to_target`. `(cx, cy)` is the iteration
+// centre in the target frame (the layer passes the camera origin's XY; the offline
+// utility passes the boat-XY for boat-centred visualisation). `half_extent` is the
+// iteration half-width of the square AABB; `res` is the cell pitch.
+inline std::vector<OccupancyObservation> project_observations_inverse(
+  const cv::Mat & mask_rgb8,
+  const image_geometry::PinholeCameraModel & camera_model,
+  const cv::Vec3d & camera_origin,
+  const cv::Matx33d & rotation_cam_to_target,
+  double max_range,
+  double cx, double cy, double res, double half_extent,
+  double plane_z = 0.0,
+  double min_grazing_angle_deg = 0.0)
+{
+  // Lowest (nearest) waterline contact per column — same primitive as forward.
+  std::vector<int> contact_row(mask_rgb8.cols, -1);
+  for (int col = 0; col < mask_rgb8.cols; ++col) {
+    for (int row = mask_rgb8.rows - 1; row >= 0; --row) {
+      if (is_waterline_contact_pixel(mask_rgb8, row, col)) {
+        contact_row[col] = row;
+        break;
+      }
+    }
+  }
+
+  // Grazing-angle cutoff: reject rays where |dz| / |d| < sin(min_grazing) —
+  // i.e. rays that hit the water plane at less than the configured angle from
+  // horizontal. Squared form avoids the per-cell sqrt: |dz|^2 >= s^2 * |d|^2
+  // (both sides non-negative, squaring preserves the inequality). A camera at
+  // height h enforces max horizontal range ≈ h / tan(min_grazing): at h=1.5 m
+  // and 5°, that's ~17 m; at 2°, ~43 m. Default 0° = no filter (back-compat).
+  const double min_grazing_sin = std::sin(min_grazing_angle_deg * M_PI / 180.0);
+  const double min_grazing_sin_sq = min_grazing_sin * min_grazing_sin;
+
+  const cv::Matx33d rotation_target_to_cam = rotation_cam_to_target.t();
+  std::vector<OccupancyObservation> observations;
+  const int n = static_cast<int>(std::lround(2.0 * half_extent / res));
+  for (int iy = 0; iy < n; ++iy) {
+    for (int ix = 0; ix < n; ++ix) {
+      const double wx = cx + (ix - n / 2) * res;
+      const double wy = cy + (iy - n / 2) * res;
+      const cv::Vec3d d(wx - camera_origin[0], wy - camera_origin[1], plane_z - camera_origin[2]);
+      const double range_sq = d.dot(d);
+      if (range_sq > max_range * max_range) { continue; }  // beyond sensor range
+      if (min_grazing_sin > 0.0 && d[2] * d[2] < min_grazing_sin_sq * range_sq) {
+        continue;  // ray strikes water plane too shallowly — high ground-error per pitch arc-sec
+      }
+      const cv::Vec3d pc = rotation_target_to_cam * d;    // cell in camera optical frame
+      if (pc[2] <= 0.0) { continue; }                     // behind the camera (+z forward)
+      const cv::Point2d uv = camera_model.project3dToPixel(cv::Point3d(pc[0], pc[1], pc[2]));
+      if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) { continue; }
+      const int u = static_cast<int>(std::lround(uv.x));
+      const int v = static_cast<int>(std::lround(uv.y));
+      if (u < 0 || u >= mask_rgb8.cols || v < 0 || v >= mask_rgb8.rows) { continue; }
+      const cv::Vec3b px = mask_rgb8.at<cv::Vec3b>(v, u);
+      if (is_obstacle_pixel(px)) {
+        if (v == contact_row[u]) {
+          observations.push_back({wx, wy, true});         // waterline contact → hit
+        }
+        // else: above (or below an unselected) contact = body → leave unobserved
+      } else if (px[1] > px[0] && px[1] > px[2]) {        // green-dominant = water
+        observations.push_back({wx, wy, false});          // positively observed water → miss
+      }
+      // else: sky (blue-dominant) or ambiguous → skip (no observation)
+    }
+  }
+  return observations;
 }
 
 }  // namespace sea_surface_segmentation

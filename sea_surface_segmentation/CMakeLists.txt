@@ -17,7 +17,16 @@ find_package(depthai CONFIG REQUIRED)
 find_package(depthai_bridge REQUIRED)
 find_package(depthai_marine REQUIRED)
 find_package(image_geometry REQUIRED)
+find_package(grid_map_core REQUIRED)
+# grid_map_core's extras inject -DEIGEN_*_PLUGIN globally via add_definitions, so
+# every TU compiled past this point needs grid_map_core's include dir to find the
+# plugin headers — not just the targets that link grid_map_core::grid_map_core.
+# The legacy *_INCLUDE_DIRS var is empty under the modern target export, so pull
+# the path from the imported target and add it globally.
+get_target_property(grid_map_core_INC grid_map_core::grid_map_core INTERFACE_INCLUDE_DIRECTORIES)
+include_directories(${grid_map_core_INC})
 find_package(lifecycle_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
@@ -73,14 +82,17 @@ install(TARGETS segments_to_pointcloud
 
 add_library("sea_surface_layer" SHARED
   src/sea_surface_layer.cpp
+  src/sea_surface_relay_layer.cpp
 )
 add_library("sea_surface_layer::sea_surface_layer" ALIAS "sea_surface_layer")
 
-target_link_libraries(sea_surface_layer 
+target_link_libraries(sea_surface_layer
+  grid_map_core::grid_map_core
   image_geometry::image_geometry
   nav2_costmap_2d::nav2_costmap_2d_core
   rclcpp::rclcpp
   tf2_ros::tf2_ros
+  ${nav_msgs_TARGETS}
 )
 
 ament_target_dependencies(sea_surface_layer
@@ -94,6 +106,32 @@ install(
   EXPORT export_sea_surface_layer
   DESTINATION lib
 )
+
+# Offline bag → costmap video tool (#19 verification): replays recorded
+# segmentation through the OccupancyBuffer with the corrected INVERSE (cell→pixel)
+# projection, rendering a mosaic (4-cam tiles | live boat costmap | OURS-inverse)
+# for review before deployment. The forward `project_observations` lives in
+# segments_projection.hpp for the reflex pointcloud feed but is not used here.
+find_package(rosbag2_cpp REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(OpenCV REQUIRED)
+add_executable(bag_to_costmap_video tools/bag_to_costmap_video.cpp)
+target_include_directories(bag_to_costmap_video PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(bag_to_costmap_video
+  grid_map_core::grid_map_core
+  image_geometry::image_geometry
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  tf2::tf2
+  ${OpenCV_LIBS}
+  ${sensor_msgs_TARGETS}
+  ${tf2_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+)
+ament_target_dependencies(bag_to_costmap_video cv_bridge)
+install(TARGETS bag_to_costmap_video DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
@@ -144,6 +182,38 @@ if(BUILD_TESTING)
     image_geometry::image_geometry
     tf2::tf2
     ${sensor_msgs_TARGETS}
+  )
+
+  # occupancy_buffer.hpp is the pure log-odds buffer (grid_map storage +
+  # rolling); private to the layer in src/, exercised via this GTest. Links
+  # grid_map_core for GridMap.
+  ament_add_gtest(test_occupancy_buffer test/test_occupancy_buffer.cpp)
+  target_include_directories(test_occupancy_buffer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(test_occupancy_buffer
+    grid_map_core::grid_map_core
+  )
+
+  # Plugin smoke test: loads each costmap_2d plugin via pluginlib AND calls
+  # `Layer::initialize` against a real LayeredCostmap + LifecycleNode. The
+  # initialize path is what surfaces declaration-order bugs in `onInitialize`
+  # (e.g. registering an on-set-parameters callback before declaring a param
+  # the callback would reject — throws InvalidParameterValueException during
+  # `declare_parameter`'s initial-value validation, abort onInitialize, layer
+  # fails to load at deployment). Unit tests that exercise the pure helpers
+  # don't reach this path; this test does. Links nav2_costmap_2d_core +
+  # nav2_util for LayeredCostmap + LifecycleNode and pluginlib for ClassLoader.
+  find_package(nav2_util REQUIRED)
+  ament_add_gtest(test_layer_plugin_loading test/test_layer_plugin_loading.cpp)
+  target_link_libraries(test_layer_plugin_loading
+    nav2_costmap_2d::nav2_costmap_2d_core
+    tf2_ros::tf2_ros
+  )
+  ament_target_dependencies(test_layer_plugin_loading
+    nav2_util
+    pluginlib
+    rclcpp
   )
 
   # launch_testing integration: replay a 20s slice of the 2026-05-22

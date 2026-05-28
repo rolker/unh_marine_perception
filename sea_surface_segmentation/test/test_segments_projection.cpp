@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 #include <opencv2/core.hpp>
@@ -14,6 +15,10 @@
 #include "segments_projection.hpp"
 
 using sea_surface_segmentation::is_obstacle_pixel;
+using sea_surface_segmentation::is_waterline_contact_pixel;
+using sea_surface_segmentation::project_observations;
+using sea_surface_segmentation::project_observations_inverse;
+using sea_surface_segmentation::OccupancyObservation;
 using sea_surface_segmentation::project_obstacle_pixels;
 using sea_surface_segmentation::ProjectedPoint;
 using sea_surface_segmentation::ProjectionStats;
@@ -112,6 +117,48 @@ TEST(IsObstaclePixel, NonRedDominantFalse)
   EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(0, 0, 200)));       // pure blue
   EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(200, 200, 200)));   // gray (ties don't dominate)
   EXPECT_FALSE(is_obstacle_pixel(cv::Vec3b(200, 200, 0)));     // red-tied-with-green
+}
+
+// is_waterline_contact_pixel: only the lowest obstacle pixel in a column
+// (the one with water directly below) is the waterline contact; obstacle
+// pixels stacked above it are the object's body and must NOT count as
+// contacts (their cells become the false "shadow").
+TEST(WaterlineContactPixel, OnlyLowestObstaclePixelInColumnIsContact)
+{
+  // 8x8 mask, all water (green). Column 4 holds a 3-px-tall obstacle in
+  // rows 2,3,4 with water below it (rows 5..7).
+  cv::Mat mask(8, 8, CV_8UC3, cv::Scalar(0, 200, 0));  // BGR-agnostic: G-dominant = water
+  for (int row = 2; row <= 4; ++row) {
+    mask.at<cv::Vec3b>(row, 4) = cv::Vec3b(200, 0, 0);  // R-dominant = obstacle
+  }
+
+  EXPECT_TRUE(is_waterline_contact_pixel(mask, 4, 4))   // base: water (row 5) below
+    << "lowest obstacle pixel in the column is the waterline contact";
+  EXPECT_FALSE(is_waterline_contact_pixel(mask, 3, 4))  // obstacle below (row 4)
+    << "body pixel with obstacle below is not a contact";
+  EXPECT_FALSE(is_waterline_contact_pixel(mask, 2, 4))  // obstacle below (row 3)
+    << "top body pixel is not a contact";
+}
+
+TEST(WaterlineContactPixel, WaterPixelIsNeverContact)
+{
+  cv::Mat mask(8, 8, CV_8UC3, cv::Scalar(0, 200, 0));
+  EXPECT_FALSE(is_waterline_contact_pixel(mask, 3, 3));
+}
+
+TEST(WaterlineContactPixel, ObstacleOnBottomRowIsContact)
+{
+  // Nothing below the bottom row to disqualify it → nearest possible return.
+  cv::Mat mask(8, 8, CV_8UC3, cv::Scalar(0, 200, 0));
+  mask.at<cv::Vec3b>(7, 4) = cv::Vec3b(200, 0, 0);
+  EXPECT_TRUE(is_waterline_contact_pixel(mask, 7, 4));
+}
+
+TEST(WaterlineContactPixel, IsolatedObstaclePixelWithWaterBelowIsContact)
+{
+  cv::Mat mask(8, 8, CV_8UC3, cv::Scalar(0, 200, 0));
+  mask.at<cv::Vec3b>(3, 4) = cv::Vec3b(200, 0, 0);  // single px, water below
+  EXPECT_TRUE(is_waterline_contact_pixel(mask, 3, 4));
 }
 
 // Center pixel under a nadir camera 1 m above the z=0 plane projects
@@ -407,4 +454,255 @@ TEST(ProjectObstaclePixels, StatsAccountForPixelsAndProjections)
   EXPECT_EQ(stats.obstacle_pixels, 1u);
   EXPECT_EQ(stats.projected, 1u);
   EXPECT_EQ(stats.dropped_nonfinite, 0u);
+}
+
+// ---- project_observations: the shared per-frame logic (waterline-contact +
+//      occlusion + water-as-free) used by both the layer and the bag utility. ----
+
+namespace
+{
+// Small nadir camera (16×12 @ fx=fy=10, 2 m up looking straight down) so every
+// pixel projects to a valid ground point — lets the classification counts be
+// asserted exactly without geometry dropping pixels.
+image_geometry::PinholeCameraModel make_small_nadir_camera()
+{
+  image_geometry::PinholeCameraModel m;
+  m.fromCameraInfo(make_pinhole_info(16, 12, 10.0, 10.0));
+  return m;
+}
+const cv::Vec3d kNadirOrigin(0.0, 0.0, 2.0);
+
+std::pair<int, int> count_obs(const std::vector<OccupancyObservation> & obs)
+{
+  int obstacle = 0, free = 0;
+  for (const auto & o : obs) { (o.obstacle ? obstacle : free)++; }
+  return {obstacle, free};
+}
+}  // namespace
+
+// All-water mask → every pixel is a free observation, no obstacles.
+TEST(ProjectObservations, AllWaterIsAllFree)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // green = water
+  const auto obs = project_observations(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(), /*max_range=*/100.0);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_EQ(obstacle, 0);
+  EXPECT_EQ(free, 16 * 12);
+}
+
+// A 3-pixel-tall obstacle in one column (rows 2,3,4, water below) yields exactly
+// ONE obstacle observation (the waterline contact, row 4); the two body pixels
+// are occluded and skipped (not free, not obstacle); all water → free. This is
+// the shadow/occlusion behavior.
+TEST(ProjectObservations, TallObstacleYieldsOneContactNotBody)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));
+  for (int row = 2; row <= 4; ++row) {
+    mask.at<cv::Vec3b>(row, 8) = cv::Vec3b(200, 0, 0);  // red = obstacle
+  }
+  const auto obs = project_observations(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(), /*max_range=*/100.0);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_EQ(obstacle, 1) << "only the waterline contact, not each body pixel";
+  EXPECT_EQ(free, 16 * 12 - 3) << "all water pixels free; 3 obstacle pixels are not free";
+  EXPECT_EQ(static_cast<int>(obs.size()), 16 * 12 - 2) << "2 body pixels skipped entirely";
+}
+
+// An isolated obstacle pixel with water directly below is a contact → 1 obstacle.
+TEST(ProjectObservations, IsolatedContactIsObstacle)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));
+  mask.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);  // row 7 below is water
+  const auto obs = project_observations(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(), /*max_range=*/100.0);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_EQ(obstacle, 1);
+  EXPECT_EQ(free, 16 * 12 - 1);
+}
+
+// ---- project_observations_inverse: the per-cell→pixel classifier the layer uses
+//      (and the offline utility shares). Cell-iteration centred on (cx,cy);
+//      same contact-only marking + sky-skip semantics. ----
+
+// All-water mask → every in-footprint cell is missed (free); no obstacles.
+TEST(ProjectObservationsInverse, AllWaterAllMisses)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // green-dominant = water
+  const auto obs = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, /*cx=*/0.0, /*cy=*/0.0, /*res=*/0.2, /*half_extent=*/1.5);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_EQ(obstacle, 0);
+  EXPECT_GT(free, 0) << "every in-footprint cell should be classified as water-miss";
+}
+
+// All-sky mask → every cell projects to a sky pixel → SKIP (no obs), not miss.
+// The sky-as-miss bug would over-clear cells; sky-skip preserves them.
+TEST(ProjectObservationsInverse, AllSkyAllSkippedNotCleared)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 0, 200));  // blue-dominant = sky
+  const auto obs = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, /*cx=*/0.0, /*cy=*/0.0, /*res=*/0.2, /*half_extent=*/1.5);
+  EXPECT_TRUE(obs.empty()) << "sky-projecting cells must be skipped, not marked free";
+}
+
+// A column with a 2-px-tall obstacle above water: only cells projecting to the
+// contact row (lowest obstacle pixel) produce a hit; cells projecting to the
+// body pixel above are skipped (occluded); water cells around → miss.
+TEST(ProjectObservationsInverse, ContactCellHitsBodyCellsSkipped)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // water everywhere
+  // 2-tall obstacle in column 8: rows 5 (body) and 6 (contact), water row 7+.
+  mask.at<cv::Vec3b>(5, 8) = cv::Vec3b(200, 0, 0);
+  mask.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);
+  const auto obs = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, /*cx=*/0.0, /*cy=*/0.0, /*res=*/0.2, /*half_extent=*/1.5);
+  auto [obstacle, free] = count_obs(obs);
+  EXPECT_GT(obstacle, 0) << "the contact cell must produce at least one hit";
+  EXPECT_GT(free, 0) << "water cells must still be missed";
+  // The body pixel above the contact is occluded; no cell should be flagged as
+  // obstacle there. Verify by ensuring obstacle count is bounded — the contact
+  // is one pixel, so only cells projecting to that one pixel become hits.
+  EXPECT_LE(obstacle, 4) << "only the contact-pixel's cell footprint is hit, not the body's";
+}
+
+// Cells beyond max_range (even when in-image) are dropped by the Euclidean
+// range gate. With camera at z=2 and max_range=2.05, only the cells directly
+// under (slant distance ≈ 2.0–2.05 m) survive; an iteration covering several
+// metres horizontally should produce far fewer observations than the same
+// iteration with a generous range cap.
+TEST(ProjectObservationsInverse, MaxRangeDropsFarCells)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));
+  const auto loose = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, 0.0, 0.0, 0.2, 1.5);
+  const auto tight = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/2.05, 0.0, 0.0, 0.2, 1.5);
+  EXPECT_LT(tight.size(), loose.size())
+    << "tight max_range must drop far cells the loose range admits";
+  EXPECT_GT(tight.size(), 0u) << "near-overhead cells should still pass the tight gate";
+}
+
+// Minimum grazing angle cuts off rays that hit the water plane too shallowly.
+// At camera height h, a min-grazing angle of θ enforces max horizontal range
+// ≈ h / tan(θ). Use a nadir camera so all rays straight down have grazing 90°
+// (every cell passes any cutoff < 90°), then a pitched camera so the cutoff
+// actually starts dropping cells at the expected horizontal range.
+TEST(ProjectObservationsInverse, MinGrazingAngleDropsShallowRays)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // water everywhere
+
+  // Pitched 30°, camera at 1.5 m, iteration centred at camera XY out to 50 m.
+  // No grazing cutoff: many cells observed.
+  image_geometry::PinholeCameraModel cam;
+  cam.fromCameraInfo(make_pinhole_info(160, 120, 100.0, 100.0));  // larger img so more rays land in-image
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.5);
+  const auto rotation = pitched_rotation(30.0);
+
+  const auto loose = project_observations_inverse(
+    mask, cam, camera_origin, rotation,
+    /*max_range=*/100.0, /*cx=*/10.0, /*cy=*/0.0, /*res=*/0.5,
+    /*half_extent=*/15.0, /*plane_z=*/0.0, /*min_grazing_angle_deg=*/0.0);
+
+  // Tight grazing cutoff at 30° → max horizontal range = 1.5 / tan(30°) = 2.6 m.
+  // Cells beyond ~2.6 m horizontal (from the camera at origin) must drop.
+  const auto tight = project_observations_inverse(
+    mask, cam, camera_origin, rotation,
+    /*max_range=*/100.0, /*cx=*/10.0, /*cy=*/0.0, /*res=*/0.5,
+    /*half_extent=*/15.0, /*plane_z=*/0.0, /*min_grazing_angle_deg=*/30.0);
+
+  ASSERT_GT(loose.size(), 0u);
+  EXPECT_LT(tight.size(), loose.size())
+    << "min_grazing_angle_deg must drop shallow-grazing cells";
+
+  // Every cell that survives the tight cutoff must hit the water plane at >= 30°.
+  // For a cell at (x, y, 0) viewed from (0, 0, 1.5), grazing angle is
+  // atan(1.5 / sqrt(x*x + y*y)). 30° → sqrt(x*x + y*y) <= 1.5 / tan(30°) ≈ 2.598.
+  const double max_horiz = 1.5 / std::tan(30.0 * M_PI / 180.0);
+  for (const auto & o : tight) {
+    const double horiz = std::sqrt(o.x * o.x + o.y * o.y);
+    EXPECT_LE(horiz, max_horiz + 1e-6)
+      << "cell at horizontal range " << horiz << " exceeds grazing-30° reach "
+      << max_horiz << " — cutoff is wrong";
+  }
+}
+
+// Pitched, off-centre camera — the production call shape. Exercises three gaps
+// in the nadir tests: (a) off-centre iteration (cx,cy = camera XY, not 0), (b)
+// the pc[2] <= 0 behind-camera reject, (c) body-vs-contact occlusion under
+// non-trivial geometry — only cells projecting to the contact row (the lowest
+// obstacle pixel with water directly below) produce hits; cells projecting to
+// body pixels above are skipped. Camera at world (5, 3, 1.5), pitched 30° down
+// looking +x; iteration centred at the camera's XY so the back half of the
+// window (wx < 5) sits behind the camera and must be silently rejected.
+//
+// Note on `v == contact_row[u]` vs the previous `v >= contact_row[u]`: the two
+// forms are functionally equivalent against the `is_waterline_contact_pixel`
+// definition. The contact is the lowest obstacle pixel with water directly
+// below, OR an obstacle pixel on the bottom image row (treated as a contact
+// since nothing below can disqualify it). Any obstacle pixel below the
+// recorded contact would therefore extend an unbroken obstacle column down to
+// the image bottom — which makes the bottom row a contact by the
+// special case, displacing the recorded contact lower. So no real mask reaches
+// the `v > contact_row[u]` branch. The `==` form is preferred purely for
+// consistency with the forward sibling `project_observations`.
+TEST(ProjectObservationsInverse, PitchedOffCentreRejectsBehindAndOccludesBody)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // water everywhere
+  // Two-pixel-tall obstacle in column 8: row 6 (body, above contact, occluded)
+  // and row 7 (contact, water at row 8 directly below). The body row must NOT
+  // produce hits; the contact row must produce at least one.
+  mask.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);
+  mask.at<cv::Vec3b>(7, 8) = cv::Vec3b(200, 0, 0);
+
+  image_geometry::PinholeCameraModel cam;
+  cam.fromCameraInfo(make_pinhole_info(16, 12, 10.0, 10.0));
+  const cv::Vec3d camera_origin(5.0, 3.0, 1.5);
+
+  const auto obs = project_observations_inverse(
+    mask, cam, camera_origin, pitched_rotation(30.0),
+    /*max_range=*/50.0, /*cx=*/5.0, /*cy=*/3.0, /*res=*/0.2, /*half_extent=*/6.0);
+
+  ASSERT_FALSE(obs.empty()) << "in-front in-FOV cells should produce some observations";
+
+  int behind = 0, hits = 0;
+  for (const auto & o : obs) {
+    if (o.x < camera_origin[0] - 1e-9) { ++behind; }
+    if (o.obstacle) { ++hits; }
+  }
+  EXPECT_EQ(behind, 0)
+    << "cells behind the camera (wx < camera_x) must be rejected by pc[2] <= 0";
+  EXPECT_GT(hits, 0)
+    << "the contact row must produce at least one hit under a pitched camera";
+
+  // Off-centre iteration: observed cells should cluster around the camera XY,
+  // not the world origin. With cy=3 and half_extent=6, observations span y ∈
+  // roughly [-3, 9] — the principal-point ray hits y = 3, so at least one
+  // observation must have |y - 3| < 1 m.
+  bool any_near_camera_y = false;
+  for (const auto & o : obs) {
+    if (std::abs(o.y - camera_origin[1]) < 1.0) { any_near_camera_y = true; break; }
+  }
+  EXPECT_TRUE(any_near_camera_y)
+    << "iteration should be centred at cy=" << camera_origin[1] << ", not 0";
+
+  // Body-vs-contact occlusion under pitched geometry: every hit must come from
+  // a cell projecting to the contact row 7, not body row 6. For this geometry
+  // (camera at z=1.5, 30° pitch, fy=10, cy=6), the contact-row ground
+  // intersection is at world x ≈ 7.09; the body row 6 (principal point) lies
+  // at x ≈ 7.60. Bound hits to x < 7.30 — covers contact-row cells with margin
+  // while excluding body-row cells.
+  for (const auto & o : obs) {
+    if (o.obstacle) {
+      EXPECT_LT(o.x, 7.30)
+        << "hit at x=" << o.x << " is beyond the contact-row reach — body "
+           "row (row 6) appears to be marking, indicating body-vs-contact "
+           "occlusion broke under pitched geometry";
+    }
+  }
 }
