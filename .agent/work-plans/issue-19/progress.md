@@ -239,3 +239,50 @@ Addresses the 4 outstanding Copilot inline review comments on PR #20:
 - Phase 4 (multi-source consolidation), 6 (live-tunable param callback), 8 (docs + dependent seafloor config PR — the #19 finalizer).
 - New scope per offline review: `SeaSurfaceRelayLayer` global-costmap publish-and-relay (buoys don't reach the planner today — Smac sees only chart+inflation).
 - Sibling diagnostic issue [#21](https://github.com/rolker/unh_marine_perception/issues/21) (camera↔TF motion-consistency tool) remains captured but unimplemented.
+
+## Phases 4–6 + global-relay (pre-push)
+**Status**: 6 commits ready (5 phase + 1 fixup); pre-push sub-agent review complete
+**When**: 2026-05-28 12:10 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+**Verdict**: approve-with-suggestions (2 must-fix + 2 suggestions addressed; 2 minor suggestions deferred)
+
+**Branch**: feature/issue-19 (6 new commits vs `origin/feature/issue-19`)
+**Tests**: 56 / 56 passing
+**Mode**: pre-push
+
+### Scope (in commit order)
+
+- `39f3fbd` — **phase 5 polish** in `sea_surface_layer.cpp`: (a) `count_x_/count_y_/resolution_` read in `updateBounds` now holds `costmap_mutex_`; (b) `current_=true` set after a successful `segmentsCallback` so `LayeredCostmap::isCurrent()` stops reporting the layer stale; (c) TF / `cv_bridge` failure WARN is now `RCLCPP_WARN_THROTTLE` (5 s) and names the source frame + image stamp; (d) `matchSize()` WARNs when `maximum_range_` exceeds the buffer half-extent (no silent clamp; operator decides between raising the costmap size and lowering `maximum_range`); (e) TODO at the `project_observations_inverse` call site for the future FOV-cone cull (square AABB over-iterates by ~21%).
+
+- `a2c34ed` — **phase 6 validating live-tunable params**: `OnSetParametersCallbackHandle` accepts runtime `ros2 param set` for the 5 `OccupancyParams` scalars + `maximum_range`. Topic and source-list params remain configure-time. The callback builds a candidate copy under the lock, applies the proposed updates, validates via `OccupancyBuffer::validate()` + `maximum_range > 0 && finite`, and only on success swaps under the same lock. NaN / out-of-range / safety-inversion is rejected with `successful=false` and a human-readable `reason` — the safety layer's interpretation cannot be silently poisoned. New test `OccupancyBuffer::SetParamsReinterpretsAccumulatedEvidence` proves the contract (a sub-threshold hit at the default `lethal_threshold=1.0` becomes lethal as soon as `setParams` lowers it to `0.3`, no re-observation). Closes #10 K at the buffer + callback layer; rclcpp::Parameter → field dispatch is not unit-tested (would need an rclcpp test fixture).
+
+- `1106659` — **phase 4 multi-source consolidation**: new `observation_sources` (vector<string>) param. Each named source has `<name>.segmentation_topic` and `<name>.camera_info_topic` (mirrors the nav2 ObstacleLayer per-source pattern). All sources feed the shared world-frame `OccupancyBuffer`, so an obstacle in two cameras' overlap accumulates evidence from every camera — the cross-camera fusion the four per-direction layer instances couldn't do. `Source` struct held in `std::vector<std::unique_ptr<Source>>` (unique_ptr so each Source's address stays stable for the lifetime of the layer; the per-subscription lambdas capture `Source *`). Back-compat: when `observation_sources` is empty (default), the layer reads top-level `segmentation_topic` / `camera_info_topic` and synthesizes a single source named `"default"` — pre-#19 configs work unchanged. The cross-source fusion property is a wiring property best verified by ros2 launch fixture; buffer-side accumulation is already covered. Per-source WARN message identifies the source name.
+
+- `d722cf2` — **publish lethal grid**: optional `nav_msgs::msg::OccupancyGrid` publisher on configurable `published_topic` (empty default = disabled). Cells >= `lethal_threshold` publish as `100`; everything else as `-1` ("no opinion") so consumers never inadvertently clear other layers' marks. QoS `transient_local` depth 1. Hand-rolled grid_map → OccupancyGrid conversion (walks OG cells, queries `buffer_->isLethal` by world position) avoids pulling in grid_map_ros as a build dep; O(W×H) per cycle — 40 k Eigen reads on a 200×200 costmap, negligible vs the segmentation projection.
+
+- `5684350` — **new `SeaSurfaceRelayLayer` plugin**: thin counterpart to the publisher above. Subscribes to a `nav_msgs/OccupancyGrid` topic, caches the latest message, expands master bounds to cover the published grid in `updateBounds`, and stamps `LETHAL_OBSTACLE` into the master where the published cell is `>= 100`. Cell-lookup by world position (so producer and consumer can have different costmap pose / resolution / dimensions and the lethal cells still land at the right world location). Frame mismatch drops the message with a throttled WARN — stamping LETHAL at the wrong world position is a safety risk on an obstacle layer. `isClearable()` returns false (producer owns clearing via decay). New source built into the existing `sea_surface_layer` shared library; `costmap_plugins.xml` adds a second `<class>` entry. End-to-end:
+  - `local_costmap.sea_surface_layer` (SeaSurfaceLayer) with `published_topic: /sea_surface/lethal_grid` →
+  - `global_costmap.sea_surface_relay` (SeaSurfaceRelayLayer) with `topic: /sea_surface/lethal_grid` →
+  - SmacPlannerHybrid sees buoys in the global plan.
+
+- `85e3594` — **fixup from pre-push sub-agent review** of `39f3fbd..5684350`. Addresses both must-fix and 2 suggestions:
+  - (must-fix) `onParametersSet` catches `rclcpp::exceptions::InvalidParameterTypeException` and returns `successful=false`. Previously a wrong-type `ros2 param set` would propagate the exception out of the parameter service callback and likely terminate the node.
+  - (must-fix) `Source` is now constructed step-by-step (`auto src = std::make_unique<Source>(); src->field = …;`) instead of via positional brace-init. The aggregate form would silently mis-initialize if Source's member count changes.
+  - (suggestion) `publishLethalGrid` uses the snapshot pattern — copy the grid_map under `costmap_mutex_`, walk the copy off-lock. Avoids serializing every `segmentsCallback` hit against the ~40k-cell scan.
+  - (suggestion) `onParametersSet` explicitly rejects configure-time params (`observation_sources`, top-level + per-source `segmentation_topic`/`camera_info_topic`, `published_topic`) via a suffix-matched helper. Operator gets clear "restart to apply" feedback instead of a silent accept.
+
+### Sub-agent review findings (fresh-context Claude)
+- [x] **must-fix** `onParametersSet`: `as_double()` throws on type mismatch; node-terminating exception. — `sea_surface_layer.cpp:498-516` (addressed `85e3594`)
+- [x] **must-fix** Source aggregate-init is fragile. — `sea_surface_layer.cpp:104, 123` (addressed `85e3594`)
+- [x] (suggestion) `publishLethalGrid` holds lock through ~40k-cell scan. — `sea_surface_layer.cpp:436-467` (addressed `85e3594`)
+- [x] (suggestion) `onParametersSet` doesn't reject configure-time params. — `sea_surface_layer.cpp` (addressed `85e3594`)
+- [ ] (suggestion) Relay frame-mismatch drops: log INFO on first matching-frame message after a drop streak. — `sea_surface_relay_layer.cpp:155-166` (deferred)
+- [ ] (suggestion) Relay updateBounds/updateCosts re-fetch `latest_` independently — document the one-tick inconsistency window. — `sea_surface_relay_layer.cpp:69-148` (deferred)
+- (nit) Non-virtual dtor pattern; leading blank lines; duplicate `find_package(nav_msgs)`. Deferred — Copilot may surface.
+
+### Follow-ups (next session, post-push)
+- **Phase 8 / finalizer**: seafloor config PR in `unh_echoboats_project11` migrating `bizzyboat_project11/config/nav2_overlay.yaml` from 4 direction-named SeaSurfaceLayer instances → 1 multi-source block in `local_costmap` + the new `SeaSurfaceRelayLayer` in `global_costmap`. IzzyBoat parity per `#120/#181`.
+- Package README/params doc in `sea_surface_segmentation` updating for `observation_sources` + `published_topic` + the runtime-tunable params + the new `SeaSurfaceRelayLayer` plugin.
+- Triage Copilot's post-push re-review on PR #20.
+- Integration test (ros2 launch + bag) for the publisher / relay end-to-end and for the cross-source fusion property in phase 4.
+- Sibling diagnostic issue [#21](https://github.com/rolker/unh_marine_perception/issues/21) (camera↔TF motion-consistency tool) remains captured but unimplemented.
