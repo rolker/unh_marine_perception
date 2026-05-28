@@ -9,6 +9,7 @@
 
 #include "cv_bridge/cv_bridge.hpp"
 #include "image_geometry/pinhole_camera_model.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "rclcpp/parameter.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
@@ -162,6 +163,21 @@ public:
     // poison the buffer interpretation.
     param_callback_handle_ = node->add_on_set_parameters_callback(
       std::bind(&SeaSurfaceLayer::onParametersSet, this, std::placeholders::_1));
+
+    // Optional publish-and-relay: when `published_topic` is non-empty, the
+    // layer republishes its lethal cells as a nav_msgs/OccupancyGrid on that
+    // topic so the companion `SeaSurfaceRelayLayer` (in global_costmap) can
+    // stamp them into the global costmap before inflation. Mirrors the
+    // s57_grids / s57_layer producer/consumer pattern; the projection still
+    // runs only once. Defaults to off (empty topic = no publisher).
+    declareParameter("published_topic", rclcpp::ParameterValue(std::string{}));
+    node->get_parameter(name_ + ".published_topic", published_topic_);
+    if (!published_topic_.empty()) {
+      lethal_publisher_ = node->create_publisher<nav_msgs::msg::OccupancyGrid>(
+        published_topic_, rclcpp::QoS(1).transient_local());
+      RCLCPP_INFO_STREAM(
+        logger_, "SeaSurfaceLayer publishing lethal grid on '" << published_topic_ << "'");
+    }
   }
 
   void reset() override
@@ -217,6 +233,11 @@ public:
         buffer_->decay(node->now().seconds());
       }
     }
+
+    // Republish the lethal cells for any downstream consumer (e.g. the
+    // SeaSurfaceRelayLayer in global_costmap). No-op when no publisher was
+    // wired in onInitialize (published_topic was empty).
+    publishLethalGrid();
   }
 
   void updateCosts(
@@ -392,6 +413,62 @@ private:
     src.camera_model = model;
   }
 
+  // Publish the lethal-cell mask as a nav_msgs/OccupancyGrid so a downstream
+  // `SeaSurfaceRelayLayer` (or any consumer) can stamp the same lethal cells
+  // into a different costmap without rerunning the segmentation projection.
+  // Cells at or above the lethal threshold publish as 100; everything else
+  // (unobserved or sub-threshold) publishes as -1 ("no opinion") so the
+  // consumer never inadvertently clears another layer's marks. Header frame
+  // is the costmap's global frame (e.g. `map_tide`).
+  void publishLethalGrid()
+  {
+    if (!lethal_publisher_) {
+      return;
+    }
+    auto node = node_.lock();
+    if (!node) {
+      return;
+    }
+    nav_msgs::msg::OccupancyGrid msg;
+    msg.header.stamp = node->now();
+    msg.header.frame_id = global_frame_id_;
+
+    {
+      std::lock_guard<std::mutex> lock(costmap_mutex_);
+      if (!buffer_) {
+        return;
+      }
+      const auto & map = buffer_->map();
+      const auto size = map.getSize();
+      const auto center = map.getPosition();
+      msg.info.resolution = static_cast<float>(map.getResolution());
+      msg.info.width = static_cast<uint32_t>(size(0));
+      msg.info.height = static_cast<uint32_t>(size(1));
+      // grid_map is positioned by its center; OccupancyGrid origin is the
+      // lower-left corner of cell (0, 0).
+      msg.info.origin.position.x = center(0) - 0.5 * size(0) * map.getResolution();
+      msg.info.origin.position.y = center(1) - 0.5 * size(1) * map.getResolution();
+      msg.info.origin.position.z = 0.0;
+      msg.info.origin.orientation.w = 1.0;
+      msg.data.assign(static_cast<size_t>(size(0)) * size(1), -1);
+
+      // Walk OccupancyGrid cells in row-major order; for each cell's world
+      // position, query the buffer's lethal test. Avoids dancing through
+      // grid_map's column-major / circular-buffer index layout.
+      for (uint32_t y = 0; y < msg.info.height; ++y) {
+        for (uint32_t x = 0; x < msg.info.width; ++x) {
+          const double wx = msg.info.origin.position.x + (x + 0.5) * msg.info.resolution;
+          const double wy = msg.info.origin.position.y + (y + 0.5) * msg.info.resolution;
+          if (buffer_->isLethal(grid_map::Position(wx, wy))) {
+            msg.data[static_cast<size_t>(y) * msg.info.width + x] = 100;
+          }
+        }
+      }
+    }
+
+    lethal_publisher_->publish(msg);
+  }
+
   // Validate-then-apply param updates. Runs on the parameter service thread.
   // Builds a candidate copy of the live-tunable state from `params` (each named
   // entry overrides the candidate field), validates the candidate (NaN /
@@ -472,6 +549,14 @@ private:
   std::vector<std::unique_ptr<Source>> sources_;
 
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
+
+  // Optional publish-and-relay output (phase 8 / new offline-review scope):
+  // when `published_topic_` is non-empty, the layer republishes its lethal
+  // cells on it so a downstream `SeaSurfaceRelayLayer` can stamp them into
+  // a different costmap (e.g. global_costmap, before inflation) without
+  // running the segmentation projection a second time.
+  std::string published_topic_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr lethal_publisher_;
 
   std::mutex costmap_mutex_;
 };
