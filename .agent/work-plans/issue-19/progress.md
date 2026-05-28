@@ -286,3 +286,28 @@ Addresses the 4 outstanding Copilot inline review comments on PR #20:
 - Triage Copilot's post-push re-review on PR #20.
 - Integration test (ros2 launch + bag) for the publisher / relay end-to-end and for the cross-source fusion property in phase 4.
 - Sibling diagnostic issue [#21](https://github.com/rolker/unh_marine_perception/issues/21) (camera↔TF motion-consistency tool) remains captured but unimplemented.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-05-28 11:06 -04:00
+**By**: Claude Code Agent (Claude Opus 4.7 (1M context))
+
+**PR**: #20 at `d40e72b`
+**Sources**: 5 (Copilot R1 @ `0c365cc`, Copilot R2 @ `85c3c12`, Copilot R3 @ `3b52d70`, Copilot R4 @ `d40e72b`, Local Review (Pre-Push) entries)
+**Cross-source confirmations**: 4
+**CI**: copilot-pull-request-reviewer = success; no other checks configured. R4 at current HEAD found no new comments.
+
+### Findings
+- [x] (cross-confirmed, Copilot R1 + Local Review) Missing `<mutex>`/`<functional>`/`<chrono>` includes — relies on transitive includes — `sea_surface_segmentation/src/sea_surface_layer.cpp:23` (addressed `9ca9407`)
+- [x] (cross-confirmed, Copilot R1 + Local Review) Missing `<utility>` for `std::pair` — `sea_surface_segmentation/test/test_segments_projection.cpp:480` (addressed `9ca9407`)
+- [x] (cross-confirmed, Copilot R2 + Local Review) Inverse projection test coverage gap — only nadir, only centred iteration, only single-row stacks — `sea_surface_segmentation/test/test_segments_projection.cpp:589` (addressed `e263a21`: `PitchedOffCentreRejectsBehindAndOccludesBody`)
+- [x] (cross-confirmed, Copilot R2 + Local Review) `v >= contact_row[u]` vs forward sibling's `==` — semantic divergence — `sea_surface_segmentation/src/segments_projection.hpp:389` (addressed `939fd24`: align to `==` + isfinite guard)
+- [ ] (must-fix, Copilot R3) **Critical runtime bug**: `add_on_set_parameters_callback` registered at line 184; `declare_parameter("published_topic", ...)` at line 193 then triggers the callback for the initial-value validation; the callback's `is_configure_time` helper rejects `.published_topic` with `successful=false`; rclcpp turns that into `InvalidParameterValueException`, aborting `onInitialize` — the layer fails to load every time. Not caught by 57/57 GTests (none instantiate the layer via pluginlib). Fix: move `published_topic` declaration before the callback registration, or (cleaner) move the callback registration to the end of `onInitialize` after every `declareParameter`. — `sea_surface_segmentation/src/sea_surface_layer.cpp:184,193`
+- [ ] (must-fix, Copilot R3) Race on `maximum_range_`: `updateBounds` reads it 4× outside `costmap_mutex_`, but `onParametersSet` writes it under the lock. Copilot flagged the *segmentsCallback* site (now `d40e72b` reads it under the lock alongside `min_grazing_angle_deg_`), but the same race remains in `updateBounds`. Fix: snapshot under the lock at the top of `updateBounds`, use local copy for the bound-expansion reads. — `sea_surface_segmentation/src/sea_surface_layer.cpp:220-223`
+
+### False positives
+- None this round — Copilot's findings are all valid or already-addressed.
+
+### Follow-ups
+- After the two must-fix patches, push and wait for Copilot R5; expected clean.
+- Consider adding a pluginlib-loading smoke test in `BUILD_TESTING` to catch declaration-order bugs like #6 (currently no test instantiates the layer through `nav2_costmap_2d::LayeredCostmap::registerInitialPlugins`). Tracked here as a deferred follow-up; not blocking the PR.
