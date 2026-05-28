@@ -587,3 +587,78 @@ TEST(ProjectObservationsInverse, MaxRangeDropsFarCells)
     << "tight max_range must drop far cells the loose range admits";
   EXPECT_GT(tight.size(), 0u) << "near-overhead cells should still pass the tight gate";
 }
+
+// Pitched, off-centre camera — the production call shape. Exercises three gaps
+// in the nadir tests: (a) off-centre iteration (cx,cy = camera XY, not 0), (b)
+// the pc[2] <= 0 behind-camera reject, (c) body-vs-contact occlusion under
+// non-trivial geometry — only cells projecting to the contact row (the lowest
+// obstacle pixel with water directly below) produce hits; cells projecting to
+// body pixels above are skipped. Camera at world (5, 3, 1.5), pitched 30° down
+// looking +x; iteration centred at the camera's XY so the back half of the
+// window (wx < 5) sits behind the camera and must be silently rejected.
+//
+// Note on `v == contact_row[u]` vs the previous `v >= contact_row[u]`: the two
+// forms are functionally equivalent against the `is_waterline_contact_pixel`
+// definition. The contact is the lowest obstacle pixel with water directly
+// below, OR an obstacle pixel on the bottom image row (treated as a contact
+// since nothing below can disqualify it). Any obstacle pixel below the
+// recorded contact would therefore extend an unbroken obstacle column down to
+// the image bottom — which makes the bottom row a contact by the
+// special case, displacing the recorded contact lower. So no real mask reaches
+// the `v > contact_row[u]` branch. The `==` form is preferred purely for
+// consistency with the forward sibling `project_observations`.
+TEST(ProjectObservationsInverse, PitchedOffCentreRejectsBehindAndOccludesBody)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // water everywhere
+  // Two-pixel-tall obstacle in column 8: row 6 (body, above contact, occluded)
+  // and row 7 (contact, water at row 8 directly below). The body row must NOT
+  // produce hits; the contact row must produce at least one.
+  mask.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);
+  mask.at<cv::Vec3b>(7, 8) = cv::Vec3b(200, 0, 0);
+
+  image_geometry::PinholeCameraModel cam;
+  cam.fromCameraInfo(make_pinhole_info(16, 12, 10.0, 10.0));
+  const cv::Vec3d camera_origin(5.0, 3.0, 1.5);
+
+  const auto obs = project_observations_inverse(
+    mask, cam, camera_origin, pitched_rotation(30.0),
+    /*max_range=*/50.0, /*cx=*/5.0, /*cy=*/3.0, /*res=*/0.2, /*half_extent=*/6.0);
+
+  ASSERT_FALSE(obs.empty()) << "in-front in-FOV cells should produce some observations";
+
+  int behind = 0, hits = 0;
+  for (const auto & o : obs) {
+    if (o.x < camera_origin[0] - 1e-9) { ++behind; }
+    if (o.obstacle) { ++hits; }
+  }
+  EXPECT_EQ(behind, 0)
+    << "cells behind the camera (wx < camera_x) must be rejected by pc[2] <= 0";
+  EXPECT_GT(hits, 0)
+    << "the contact row must produce at least one hit under a pitched camera";
+
+  // Off-centre iteration: observed cells should cluster around the camera XY,
+  // not the world origin. With cy=3 and half_extent=6, observations span y ∈
+  // roughly [-3, 9] — the principal-point ray hits y = 3, so at least one
+  // observation must have |y - 3| < 1 m.
+  bool any_near_camera_y = false;
+  for (const auto & o : obs) {
+    if (std::abs(o.y - camera_origin[1]) < 1.0) { any_near_camera_y = true; break; }
+  }
+  EXPECT_TRUE(any_near_camera_y)
+    << "iteration should be centred at cy=" << camera_origin[1] << ", not 0";
+
+  // Body-vs-contact occlusion under pitched geometry: every hit must come from
+  // a cell projecting to the contact row 7, not body row 6. For this geometry
+  // (camera at z=1.5, 30° pitch, fy=10, cy=6), the contact-row ground
+  // intersection is at world x ≈ 7.09; the body row 6 (principal point) lies
+  // at x ≈ 7.60. Bound hits to x < 7.30 — covers contact-row cells with margin
+  // while excluding body-row cells.
+  for (const auto & o : obs) {
+    if (o.obstacle) {
+      EXPECT_LT(o.x, 7.30)
+        << "hit at x=" << o.x << " is beyond the contact-row reach — body "
+           "row (row 6) appears to be marking, indicating body-vs-contact "
+           "occlusion broke under pitched geometry";
+    }
+  }
+}
