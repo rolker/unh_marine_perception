@@ -195,6 +195,27 @@ if(BUILD_TESTING)
     grid_map_core::grid_map_core
   )
 
+  # Plugin smoke test: loads each costmap_2d plugin via pluginlib AND calls
+  # `Layer::initialize` against a real LayeredCostmap + LifecycleNode. The
+  # initialize path is what surfaces declaration-order bugs in `onInitialize`
+  # (e.g. registering an on-set-parameters callback before declaring a param
+  # the callback would reject — throws InvalidParameterValueException during
+  # `declare_parameter`'s initial-value validation, abort onInitialize, layer
+  # fails to load at deployment). Unit tests that exercise the pure helpers
+  # don't reach this path; this test does. Links nav2_costmap_2d_core +
+  # nav2_util for LayeredCostmap + LifecycleNode and pluginlib for ClassLoader.
+  find_package(nav2_util REQUIRED)
+  ament_add_gtest(test_layer_plugin_loading test/test_layer_plugin_loading.cpp)
+  target_link_libraries(test_layer_plugin_loading
+    nav2_costmap_2d::nav2_costmap_2d_core
+    tf2_ros::tf2_ros
+  )
+  ament_target_dependencies(test_layer_plugin_loading
+    nav2_util
+    pluginlib
+    rclcpp
+  )
+
   # launch_testing integration: replay a 20s slice of the 2026-05-22
   # deployment bag through segments_to_pointcloud in reflex-mode and
   # assert obstacle points land in the forward danger sector. This
