@@ -51,7 +51,44 @@ public:
         auto calibration_handler = device_->readCalibration();
 
         segmentation_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(frame_id_, true);
-        segmentation_camera_info_ = segmentation_converter_->calibrationToCameraInfo(calibration_handler, dai::CameraBoardSocket::CAM_A, 128, 96);
+        // The published segmentation image is 128x96 (NN output), but the actual
+        // pipeline is: camera preview at (params.preview_width x params.preview_height,
+        // typically 1280x720, 16:9) → ImageManip stretches to 512x384 (4:3) →
+        // NN downsamples to 128x96. Calling calibrationToCameraInfo directly
+        // at (128, 96) would give intrinsics that assume an isotropic scaling
+        // from the sensor — wrong, because the preview→NN-input step is an
+        // anisotropic stretch. Compute the preview-resolution intrinsics from
+        // DepthAI's calibration handler, then scale fx/cx by 128/preview_width
+        // and fy/cy by 96/preview_height to reflect the squish. Distortion
+        // coefficients are left unchanged: they're a small per-pixel correction
+        // in normalised image coordinates, and re-deriving them through a non-
+        // affine resize is non-trivial; the dominant aspect-ratio error in
+        // cell→pixel projection is what we're correcting here.
+        auto preview_camera_info = segmentation_converter_->calibrationToCameraInfo(
+          calibration_handler, dai::CameraBoardSocket::CAM_A,
+          params.preview_width, params.preview_height);
+        constexpr int kSegWidth = 128;
+        constexpr int kSegHeight = 96;
+        const double scale_x = static_cast<double>(kSegWidth) / params.preview_width;
+        const double scale_y = static_cast<double>(kSegHeight) / params.preview_height;
+        segmentation_camera_info_ = preview_camera_info;
+        segmentation_camera_info_.width = kSegWidth;
+        segmentation_camera_info_.height = kSegHeight;
+        // K (3x3 intrinsic matrix, row-major): scale fx, cx by x; fy, cy by y.
+        segmentation_camera_info_.k[0] *= scale_x;  // fx
+        segmentation_camera_info_.k[2] *= scale_x;  // cx
+        segmentation_camera_info_.k[4] *= scale_y;  // fy
+        segmentation_camera_info_.k[5] *= scale_y;  // cy
+        // P (3x4 projection matrix): same scaling on the K-equivalent entries.
+        // Tx (p[3]) and Ty (p[7]) are 0 for a monocular setup; scaling is a
+        // no-op there but kept for correctness if a stereo bridge ever fills
+        // them in.
+        segmentation_camera_info_.p[0] *= scale_x;
+        segmentation_camera_info_.p[2] *= scale_x;
+        segmentation_camera_info_.p[3] *= scale_x;
+        segmentation_camera_info_.p[5] *= scale_y;
+        segmentation_camera_info_.p[6] *= scale_y;
+        segmentation_camera_info_.p[7] *= scale_y;
 
         segmentation_publisher_ = std::make_shared<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ADatatype> >(
           segmentation_queue_,
@@ -90,6 +127,15 @@ public:
 
         auto image_manip = pipeline->create<dai::node::ImageManip>();
         image_manip->initialConfig.setFrameType(dai::ImgFrame::Type::BGR888p);
+        // EXPLICIT stretch: resize the preview into the NN input shape without
+        // preserving aspect ratio. DepthAI's setResize default is to keep the
+        // aspect ratio (which center-crops or pads), which would silently drop
+        // the side portions of a 16:9 preview when fed to a 4:3 NN. Forcing
+        // keep_aspect_ratio=false stretches the whole preview into 512x384 so
+        // the segmentation covers the full camera FOV — at the cost of
+        // anisotropic pixel scaling, which is corrected in the camera_info
+        // built below.
+        image_manip->initialConfig.setKeepAspectRatio(false);
         image_manip->initialConfig.setResize(512, 384);
 
         // Link camera preview to image manip. Camera FPS is already set by base class.
