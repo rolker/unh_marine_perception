@@ -51,3 +51,26 @@ issue: 23
 - [x] (suggestion) `ament_export_targets(export_sea_surface_layer HAS_LIBRARY_TARGET)` — the `EXPORT` set is installed but never ament-exported (pre-existing). Not required for header-only consumption (the tuner links nothing from this pkg); noted as optional completeness. — `plan.md` step 5
 - [x] (suggestion) `AccumulateParams` defaults must mirror `project_observations_inverse`'s (`plane_z=0.0`, `min_grazing_angle_deg=0.0`) or the struct owns them and the function drops its defaults — avoid two drifting default sources. — `plan.md` step 3
 - [x] Prior review-issue action items (4) all reflected in the plan; the export-completeness gap (above) was missed by review-issue and is now closed.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-05-29 06:47 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+**Verdict**: approved (1 must-fix + 3 suggestions found and fixed in-session before push)
+
+**Branch**: feature/issue-23 — reviewed `4b6ff31`, fixes in `05b6674`
+**Mode**: pre-push
+**Depth**: Standard (reason: ~440-line change, new public API export consumed cross-repo + build-config)
+**Must-fix**: 1 | **Suggestions**: 3
+**Specialists**: static analysis (ament_cpplint; cppcheck skipped — slow-version guard), governance, plan-drift, Claude adversarial (fresh-context), Copilot adversarial (ran but could not resolve file paths → no usable findings)
+
+### Findings
+- [x] (must-fix) `ament_export_dependencies(OpenCV)` exported a dep not declared in `package.xml`, yet the exported headers directly `#include <opencv2/core.hpp>` — added `<depend>libopencv-dev</depend>`. — `package.xml`
+- [x] (suggestion) move→decay ordering not actually locked (move/decay commute on the overlap); added `DecayPrecedesFreshIngest` to lock decay-before-ingest. — `test/test_occupancy_accumulator.cpp`
+- [x] (suggestion) `accumulate_frame` return-count doc overstated "applied" — reworded (counts produced obs incl. out-of-window, matching the tool's original tally). — `occupancy_accumulator.hpp`
+- [x] (suggestion) dropped the dead `EXPORT export_sea_surface_layer` keyword (we deliberately don't `ament_export_targets` the layer). — `CMakeLists.txt`
+- [x] Static analysis: cpplint `legal/copyright` + `runtime/int (long)` + `line_length`/`runtime/string` are all pre-existing or non-package-conventions (existing headers carry no copyright; existing code uses `long`; none of the line-length/string hits are in new files) — non-actionable.
+- [x] Plan drift: none — plan synced with the two implementation pivots (no `ament_export_targets`; global `include_directories(include)`).
+- [x] Behavioral equivalence with the original inline driver verified exact (incl. per-camera count semantics); `AccumulateParams` aggregate-init correct.
+
+Post-fix: 67 tests, 0 failures; downstream consumer build still clean.
