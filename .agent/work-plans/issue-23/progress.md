@@ -20,3 +20,16 @@ issue: 23
 - [ ] Fix the stale CMake comments that call the three headers "private to the layer / lives next to its .cpp in src/".
 - [ ] Keep `frame_id_resolver.hpp` private — verified it is not a transitive dependency of the export set; no action beyond confirming.
 - [ ] Verified no out-of-package consumers of the three headers (workspace-wide grep) — promotion to public API is safe; plan-task need not re-litigate.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-05-28 22:21 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+
+**Plan**: `.agent/work-plans/issue-23/plan.md` at `e74d78b`
+**PR**: https://github.com/rolker/unh_marine_perception/pull/24 (`[PLAN]` prefix)
+**Phases**: single
+
+### Open questions
+- [ ] Driver extraction boundary: shared `accumulate_frame()` takes a decoded `cv::Mat mask_rgb8` (decode per-tool) vs. a `sensor_msgs::Image` — recommend cv::Mat; confirm before implementing.
+- [ ] Header/function name: `costmap_accumulator.hpp` / `accumulate_frame()` vs. the issue's "bag→costmap driver" wording (processes one frame, not a bag).
