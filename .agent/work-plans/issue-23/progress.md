@@ -31,5 +31,5 @@ issue: 23
 **Phases**: single
 
 ### Open questions
-- [ ] Driver extraction boundary: shared `accumulate_frame()` takes a decoded `cv::Mat mask_rgb8` (decode per-tool) vs. a `sensor_msgs::Image` — recommend cv::Mat; confirm before implementing.
-- [ ] Header/function name: `costmap_accumulator.hpp` / `accumulate_frame()` vs. the issue's "bag→costmap driver" wording (processes one frame, not a bag).
+- [x] Driver boundary — **resolved with Roland (2026-05-28): pure `cv::Mat mask_rgb8` + resolved geometry in; decode + TF per-caller.** Also corrected the segmentation-is-ffmpeg premise (segmentation is raw rgb8 `Image`; ffmpeg is the camera `image_raw` stream, display-only). Follow-up: fix that bullet in `marine_perception_tools#1`.
+- [x] Header/function name — **resolved: `occupancy_accumulator.hpp` / `accumulate_frame()`** (accumulates into the `OccupancyBuffer`, not a nav2 costmap); projection/window knobs grouped into `AccumulateParams`.

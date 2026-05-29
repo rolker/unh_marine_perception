@@ -30,12 +30,17 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
    `bag_to_costmap_video.cpp` (×2), `test_occupancy_buffer.cpp`,
    `test_segments_projection.cpp`, `test_segments_apply.cpp`.
 3. **Extract the per-frame driver** into a new header-only
-   `include/sea_surface_segmentation/costmap_accumulator.hpp` — an `inline`
+   `include/sea_surface_segmentation/occupancy_accumulator.hpp` — an `inline`
    function `accumulate_frame(OccupancyBuffer&, const cv::Mat& mask_rgb8,
-   camera_model, camera_origin, rotation, bx, by, stamp_s, max_range, res,
-   half_extent, …)` doing move/decay/project/hit-miss. Boundary = **decoded
-   `cv::Mat` in** (decode stays per-tool; see Open Questions). Header-only keeps
-   parity with the other core headers — no new library target.
+   camera_model, camera_origin, rotation, boat_x, boat_y, stamp_s, AccumulateParams)`
+   doing move/decay/project/hit-miss. The projection/window knobs (`max_range`,
+   `res`, `half_extent`, `plane_z`, `min_grazing_angle_deg`) are grouped into an
+   `AccumulateParams` struct so the call site isn't an 11-arg call. Boundary =
+   **decoded `cv::Mat mask_rgb8` + already-resolved geometry in** — decode
+   (`cv_bridge` for both tools; the projected segmentation is a raw rgb8 `Image`
+   in either case) and TF lookup stay per-caller, keeping the exported header
+   free of `cv_bridge` / `sensor_msgs` / `tf2`. Header-only keeps parity with the
+   other core headers — no new library target.
 4. **Repoint `bag_to_costmap_video.cpp`** to call `accumulate_frame(...)` so the
    exporter and the future tuner share one path (drift prevention).
 5. **CMake export plumbing**: add `install(DIRECTORY include/ DESTINATION
@@ -47,10 +52,11 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
    `test_occupancy_buffer`) to use `include/`; leave `test_frame_id_resolver` on
    `/src`. Fix the now-stale "private to the layer / lives next to its .cpp in
    src/" comments.
-6. **Add a unit test for the extracted driver** (`test/test_costmap_accumulator.cpp`):
-   feed a tiny synthetic mask + camera model + identity-ish pose into
-   `accumulate_frame` and assert expected cells flip to obstacle/free in the
-   buffer. Wire it into `BUILD_TESTING` like the other gtests.
+6. **Add a unit test for the extracted driver** (`test/test_occupancy_accumulator.cpp`):
+   feed a tiny synthetic `cv::Mat` mask + camera model + a hand-built rotation
+   into `accumulate_frame` and assert expected cells flip to obstacle/free in the
+   buffer (no `Image` message or TF buffer fixture needed — that's the payoff of
+   the pure boundary). Wire it into `BUILD_TESTING` like the other gtests.
 7. **Build + test**: `./sensors_ws/build.sh sea_surface_segmentation` then
    `./sensors_ws/test.sh sea_surface_segmentation`; confirm the 3 pre-existing
    unit tests + plugin-load + launch test still pass and the new test passes.
@@ -60,11 +66,11 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
 | File | Change |
 |------|--------|
 | `src/{occupancy_buffer,segments_projection,segments_apply}.hpp` | Move → `include/sea_surface_segmentation/` |
-| `include/sea_surface_segmentation/costmap_accumulator.hpp` | New: inline `accumulate_frame()` extracted from the tool |
+| `include/sea_surface_segmentation/occupancy_accumulator.hpp` | New: inline `accumulate_frame()` + `AccumulateParams` extracted from the tool |
 | `tools/bag_to_costmap_video.cpp` | Replace inline per-frame loop with `accumulate_frame()` call; fix 2 includes |
 | `src/sea_surface_layer.cpp`, `src/segments_to_pointcloud.cpp` | Fix include paths (3 total) |
 | `test/test_{occupancy_buffer,segments_projection,segments_apply}.cpp` | Fix include paths |
-| `test/test_costmap_accumulator.cpp` | New unit test for the driver |
+| `test/test_occupancy_accumulator.cpp` | New unit test for the driver |
 | `CMakeLists.txt` | `install(DIRECTORY include/)`, `ament_export_include_directories`/`_dependencies`, repoint test/tool include dirs, new gtest, fix stale comments |
 
 ## Principles Self-Check
@@ -95,17 +101,28 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
 | Package now exports headers | `ament_export_include_directories`/`_dependencies` + `install(DIRECTORY include/)` | Yes (step 5) |
 | Downstream `marine_perception_tools#1` | Can `find_package(sea_surface_segmentation)` + include the core after this lands | Out of scope (separate repo); unblocked by this PR |
 
+## Decisions (resolved with Roland, 2026-05-28)
+
+- **Driver boundary → pure `cv::Mat` + geometry in.** `accumulate_frame()` takes
+  an already-decoded `cv::Mat mask_rgb8` and already-resolved geometry; decode
+  and TF lookup stay per-caller. Exported header carries no `cv_bridge` /
+  `sensor_msgs` / `tf2` dependency. Rationale: minimal coupling + a pure,
+  trivially unit-testable function. (The "decode rgb8" in the issue means
+  "operates on rgb8 layout," not "performs the decode.")
+- **Segmentation is raw `Image`, not ffmpeg.** Correcting a premise in
+  `marine_perception_tools#1`'s open items: the segmentation projected onto the
+  costmap is a **raw rgb8 `sensor_msgs::Image`** (both tools `cv_bridge`-decode
+  it identically). The ffmpeg encoding is on the **camera `image_raw` stream**,
+  which the tuner decodes for **display only — never projected**. So there is no
+  decode-path mismatch on the projection boundary, and #1 needs no ffmpeg decode
+  for projection. **Follow-up:** fix that bullet in #1 when its planning starts.
+- **Name → `occupancy_accumulator.hpp` / `accumulate_frame()`.** Precise: it
+  accumulates one frame into the `OccupancyBuffer` (not a nav2 `Costmap2D` — that
+  is `segments_apply`). Projection/window knobs grouped into `AccumulateParams`.
+
 ## Open Questions
 
-- **Driver extraction boundary.** The issue lists "decode rgb8" as part of the
-  driver, but the tool decodes via `cv_bridge` (sensor_msgs::Image) while the
-  tuner decodes ffmpeg (`marine_perception_tools#1`). Recommend the shared
-  `accumulate_frame()` take an already-decoded **`cv::Mat mask_rgb8`** and keep
-  decode per-tool — maximises reuse given the differing decode paths. Confirm
-  before implementing (vs. a sensor_msgs::Image-in boundary).
-- **Header name.** `costmap_accumulator.hpp` / `accumulate_frame()` vs. the
-  issue's "bag→costmap driver" wording (the function processes one frame, not a
-  bag). Minor; will use the per-frame name unless you prefer otherwise.
+- None — decisions above resolve the plan; ready for review-plan / implementation.
 
 ## Estimated Scope
 
