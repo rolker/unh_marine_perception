@@ -14,6 +14,7 @@
 
 #include "sea_surface_segmentation/segments_projection.hpp"
 
+using sea_surface_segmentation::pixel_log_odds;
 using sea_surface_segmentation::is_obstacle_pixel;
 using sea_surface_segmentation::is_waterline_contact_pixel;
 using sea_surface_segmentation::project_observations;
@@ -102,6 +103,24 @@ constexpr double kRangeTolerance = 0.05;  // 5 cm — projection should be tight
 constexpr double kLateralTolerance = 0.05;
 
 }  // namespace
+
+// pixel_log_odds: graded evidence + defensive guards for the exported utility.
+TEST(PixelLogOdds, GradedAndDefensive)
+{
+  // Prior-shifted: zero-crossing at obstacle_prob_min, positive above, capped.
+  EXPECT_NEAR(pixel_log_odds(200, 0.35, 0.85), 0.85, 1e-9) << "confident → capped +";
+  EXPECT_LT(pixel_log_odds(20, 0.35, 0.85), 0.0) << "open water → negative";
+  EXPECT_GT(pixel_log_odds(120, 0.35, 0.85), 0.0) << "P_obs=0.47 > prob_min → still positive";
+  // Defensive: out-of-range R is clamped, never NaN/Inf.
+  EXPECT_TRUE(std::isfinite(pixel_log_odds(-5, 0.35, 0.85)));
+  EXPECT_TRUE(std::isfinite(pixel_log_odds(300, 0.35, 0.85)));
+  // Invalid params → 0.0 (no opinion), never NaN/Inf/UB.
+  EXPECT_EQ(pixel_log_odds(200, 0.0, 0.85), 0.0) << "prob_min=0 → no opinion";
+  EXPECT_EQ(pixel_log_odds(200, 1.0, 0.85), 0.0) << "prob_min=1 → no opinion";
+  EXPECT_EQ(pixel_log_odds(200, std::nan(""), 0.85), 0.0);
+  EXPECT_EQ(pixel_log_odds(200, 0.35, 0.0), 0.0) << "max_step<=0 → no opinion (no clamp UB)";
+  EXPECT_EQ(pixel_log_odds(200, 0.35, -1.0), 0.0);
+}
 
 // is_obstacle_pixel: red-dominant in, neutral/green/blue out.
 TEST(IsObstaclePixel, RedDominantTrue)

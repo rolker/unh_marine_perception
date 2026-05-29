@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <string>
 
 #include <grid_map_core/grid_map_core.hpp>
@@ -66,6 +67,18 @@ TEST(OccupancyBuffer, ClampBoundsEvidence)
   EXPECT_NEAR(buf.logOdds(kP), 5.0, 1e-5) << "saturates at obstacle_clamp";
   for (int i = 0; i < 50; ++i) { buf.accumulate(kP, -100.0); }  // huge -increments
   EXPECT_NEAR(buf.logOdds(kP), -2.0, 1e-5) << "saturates at clear_floor";
+}
+
+// A non-finite increment must be a no-op, never stored — std::clamp would
+// propagate the NaN and turn an observed cell back into "unobserved", silently
+// dropping evidence.
+TEST(OccupancyBuffer, NonFiniteIncrementIsNoOp)
+{
+  auto buf = make_buffer();
+  ASSERT_TRUE(buf.accumulate(kP, 0.5));  // establish a finite value
+  EXPECT_FALSE(buf.accumulate(kP, std::nan("")));
+  EXPECT_FALSE(buf.accumulate(kP, std::numeric_limits<double>::infinity()));
+  EXPECT_NEAR(buf.logOdds(kP), 0.5, 1e-5) << "prior evidence preserved, not NaN";
 }
 
 // occupancyAt: unobserved is -1; small positive between free and lethal ramps

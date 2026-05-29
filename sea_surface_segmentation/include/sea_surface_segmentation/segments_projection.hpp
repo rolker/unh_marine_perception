@@ -31,8 +31,20 @@ namespace sea_surface_segmentation {
 // 0.5, so a buoy where water is marginally more likely (e.g. P_obs=0.47 with
 // prob_min=0.35) still contributes POSITIVE evidence. `max_step` caps any single
 // frame for flicker rejection (and preserves ~2-frame-to-lethal at defaults).
+//
+// Defensive: this is an exported utility also called by offline tools/tuners
+// (rolker/unh_marine_perception#23) that don't run the layer's parameter
+// validation. Out-of-range inputs return 0.0 (contribute no evidence) rather
+// than feeding NaN/Inf — or tripping std::clamp's lo<=hi precondition — into the
+// occupancy buffer. The live layer still validates these at init + on set.
 inline double pixel_log_odds(int R, double obstacle_prob_min, double max_step)
 {
+  if (R < 0) { R = 0; } else if (R > 255) { R = 255; }
+  if (!(obstacle_prob_min > 0.0 && obstacle_prob_min < 1.0) ||
+    !std::isfinite(max_step) || max_step <= 0.0)
+  {
+    return 0.0;  // invalid params — no opinion rather than NaN/Inf/UB
+  }
   const double eps = 0.5;
   const double logit_R     = std::log((R + eps) / (255.0 - R + eps));
   const double logit_prior = std::log(obstacle_prob_min / (1.0 - obstacle_prob_min));

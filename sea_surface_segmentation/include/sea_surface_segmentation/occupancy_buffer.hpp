@@ -62,10 +62,12 @@ public:
   // Accumulate a graded log-odds `increment` (signed) at `position`. The result
   // is clamped to [clear_floor, obstacle_clamp]. NaN (unobserved) reads as the
   // prior (0) before adding. Returns false (no-op) if the position is outside
-  // the window.
+  // the window OR the increment is non-finite — a NaN/Inf increment must never
+  // be stored: std::clamp would propagate the NaN, turning an observed cell back
+  // into "unobserved" and silently dropping accumulated evidence.
   bool accumulate(const grid_map::Position & position, double increment)
   {
-    if (!map_.isInside(position)) { return false; }
+    if (!map_.isInside(position) || !std::isfinite(increment)) { return false; }
     float & v = map_.atPosition("log_odds", position);
     const double current = std::isfinite(v) ? static_cast<double>(v) : 0.0;  // NaN => prior
     v = static_cast<float>(
