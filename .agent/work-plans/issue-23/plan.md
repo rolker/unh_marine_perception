@@ -8,8 +8,13 @@ https://github.com/rolker/unh_marine_perception/issues/23
 
 `sea_surface_segmentation` keeps its algorithm core in private headers under
 `src/` (`occupancy_buffer.hpp`, `segments_projection.hpp`, `segments_apply.hpp`),
-reached only via per-target `target_include_directories(... /src)`. They already
-live in `namespace sea_surface_segmentation`. The per-frame bag→costmap logic
+reached only via per-target `target_include_directories(... /src)`.
+`occupancy_buffer.hpp` and `segments_projection.hpp` are in `namespace
+sea_surface_segmentation`; `segments_apply.hpp` is in `namespace
+sea_surface_layer` (it's the nav2 `Costmap2D` bridge, not part of the projection
+core) — the move preserves each header's existing namespace; do **not** unify
+them (would break `sea_surface_layer.cpp` + `test_segments_apply.cpp`). The
+per-frame bag→costmap logic
 (re-centre → decay → `project_observations_inverse` → `hit`/`miss`) is inlined in
 `tools/bag_to_costmap_video.cpp`'s `main` (~L347–364). The forthcoming
 `sea_surface_tuner` (`marine_perception_tools`, ui_ws) must run the **real**
@@ -35,7 +40,11 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
    camera_model, camera_origin, rotation, boat_x, boat_y, stamp_s, AccumulateParams)`
    doing move/decay/project/hit-miss. The projection/window knobs (`max_range`,
    `res`, `half_extent`, `plane_z`, `min_grazing_angle_deg`) are grouped into an
-   `AccumulateParams` struct so the call site isn't an 11-arg call. Boundary =
+   `AccumulateParams` struct so the call site isn't an 11-arg call. The struct's
+   defaults must mirror `project_observations_inverse`'s (`plane_z=0.0`,
+   `min_grazing_angle_deg=0.0`) — or the struct owns them and the function keeps
+   none — so there is a single source of default values, not two that can drift.
+   Boundary =
    **decoded `cv::Mat mask_rgb8` + already-resolved geometry in** — decode
    (`cv_bridge` for both tools; the projected segmentation is a raw rgb8 `Image`
    in either case) and TF lookup stay per-caller, keeping the exported header
@@ -45,21 +54,54 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
    exporter and the future tuner share one path (drift prevention).
 5. **CMake export plumbing**: add `install(DIRECTORY include/ DESTINATION
    include)`, `ament_export_include_directories(include)`, and
-   `ament_export_dependencies(grid_map_core image_geometry nav2_costmap_2d)` so a
-   downstream package gets the headers + transitive deps. Update the four
-   `target_include_directories(... /src)` lines that feed the moved headers
-   (`bag_to_costmap_video`, `test_segments_apply`, `test_segments_projection`,
-   `test_occupancy_buffer`) to use `include/`; leave `test_frame_id_resolver` on
-   `/src`. Fix the now-stale "private to the layer / lives next to its .cpp in
-   src/" comments.
+   `ament_export_dependencies(grid_map_core image_geometry nav2_costmap_2d
+   OpenCV)` — **OpenCV is a public dep**: `segments_projection.hpp` directly
+   `#include <opencv2/core.hpp>` and exposes `cv::Mat`/`cv::Vec3b` in its API, and
+   `accumulate_frame` takes `cv::Mat`. Also add `ament_export_targets(
+   export_sea_surface_layer HAS_LIBRARY_TARGET)` — the `EXPORT` set is installed
+   today (`CMakeLists.txt:104-108`) but never ament-exported; not required for the
+   tuner's header-only consumption (it links nothing from this pkg) but closes a
+   pre-existing gap cheaply. Update the four `target_include_directories(... /src)`
+   lines that feed the moved headers (`bag_to_costmap_video`, `test_segments_apply`,
+   `test_segments_projection`, `test_occupancy_buffer`) to use `include/`; leave
+   `test_frame_id_resolver` on `/src`. Fix the now-stale "private to the layer /
+   lives next to its .cpp in src/" comments.
+
+   **grid_map_core compile fragility (verify downstream):** `CMakeLists.txt:21-27`
+   documents that grid_map_core's extras inject `-DEIGEN_*_PLUGIN` globally, so
+   every TU needs grid_map_core's include dir to find the plugin headers — the
+   package works around it with a global `include_directories(${grid_map_core_INC})`.
+   Because `occupancy_buffer.hpp` includes `grid_map_core`, an external header-only
+   consumer of the export inherits this fragility. Confirm
+   `ament_export_dependencies(grid_map_core)` delivers the needed global
+   define+include ordering to a downstream `find_package(sea_surface_segmentation)`
+   build; if it does not, document the required downstream workaround in the
+   package's exported-API notes. This is the single biggest risk to the "external
+   repo reuses the REAL algorithm" goal — verify it explicitly (step 8), don't
+   assume the in-package build passing means downstream will.
 6. **Add a unit test for the extracted driver** (`test/test_occupancy_accumulator.cpp`):
    feed a tiny synthetic `cv::Mat` mask + camera model + a hand-built rotation
    into `accumulate_frame` and assert expected cells flip to obstacle/free in the
    buffer (no `Image` message or TF buffer fixture needed — that's the payoff of
-   the pure boundary). Wire it into `BUILD_TESTING` like the other gtests.
+   the pure boundary). **Cover the full move→decay→ingest sequence**, not just
+   project/hit-miss: `accumulate_frame` calls `buffer.move(pos)` then
+   `buffer.decay(stamp_s)` before projecting, and `decay()` is wall-clock-ish /
+   first-call-seeded while `move()` rolls the window (NaN-fills new cells) — the
+   ordering a refactor is most likely to break. Add ≥2-frame cases asserting (a) a
+   `move()` window shift preserves overlapping evidence at its world position and
+   (b) `decay()` between frames attenuates a prior hit. Wire into `BUILD_TESTING`
+   like the other gtests.
 7. **Build + test**: `./sensors_ws/build.sh sea_surface_segmentation` then
    `./sensors_ws/test.sh sea_surface_segmentation`; confirm the 3 pre-existing
    unit tests + plugin-load + launch test still pass and the new test passes.
+8. **Verify downstream consumability** (closes the grid_map_core fragility risk):
+   stand up a throwaway minimal consumer package that does
+   `find_package(sea_surface_segmentation)` and `#include
+   "sea_surface_segmentation/occupancy_buffer.hpp"` in one TU, and confirm it
+   compiles+links against the installed export — i.e. the `-DEIGEN_*_PLUGIN`
+   ordering and exported deps actually reach a downstream build. If it fails,
+   capture the required workaround in the package's exported-API notes before
+   marking #23 done. (This is what `marine_perception_tools#1` will rely on.)
 
 ## Files to Change
 
@@ -71,7 +113,7 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
 | `src/sea_surface_layer.cpp`, `src/segments_to_pointcloud.cpp` | Fix include paths (3 total) |
 | `test/test_{occupancy_buffer,segments_projection,segments_apply}.cpp` | Fix include paths |
 | `test/test_occupancy_accumulator.cpp` | New unit test for the driver |
-| `CMakeLists.txt` | `install(DIRECTORY include/)`, `ament_export_include_directories`/`_dependencies`, repoint test/tool include dirs, new gtest, fix stale comments |
+| `CMakeLists.txt` | `install(DIRECTORY include/)`, `ament_export_include_directories`, `ament_export_dependencies(grid_map_core image_geometry nav2_costmap_2d OpenCV)`, `ament_export_targets(export_sea_surface_layer HAS_LIBRARY_TARGET)`, repoint test/tool include dirs, new gtest, fix stale comments |
 
 ## Principles Self-Check
 
