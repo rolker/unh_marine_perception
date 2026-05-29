@@ -195,9 +195,11 @@ if(BUILD_TESTING)
   # occupancy_buffer.hpp is the pure log-odds buffer (grid_map storage + rolling),
   # an exported core header (include/), exercised via this GTest. Links
   # grid_map_core for GridMap.
+  # cost_mapping.hpp (also exercised here) pulls nav2_costmap_2d cost constants.
   ament_add_gtest(test_occupancy_buffer test/test_occupancy_buffer.cpp)
   target_link_libraries(test_occupancy_buffer
     grid_map_core::grid_map_core
+    nav2_costmap_2d::nav2_costmap_2d_core
   )
 
   # occupancy_accumulator.hpp drives the per-frame move→decay→project→hit/miss

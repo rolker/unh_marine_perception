@@ -25,6 +25,8 @@ struct AccumulateParams
   double half_extent;                  // half-width (m) of the square iteration window
   double plane_z = 0.0;                // water-plane z in the world/target frame
   double min_grazing_angle_deg = 0.0;  // reject rays striking the plane shallower; 0 = no filter
+  double obstacle_prob_min = 0.35;     // graded obstacle gate / prior for pixel_log_odds
+  double max_evidence_step = 0.85;     // per-observation log-odds cap (flicker rejection)
 };
 
 // Per-frame driver: re-centre the rolling buffer on the boat, decay stale
@@ -46,7 +48,7 @@ struct AccumulateParams
 // the helper iterates a square axis-aligned window.
 //
 // Call order matters and is locked here: move() (roll the window to the boat) →
-// decay() (attenuate stale evidence by elapsed time) → project + hit/miss. The
+// decay() (attenuate stale evidence by elapsed time) → project + accumulate. The
 // `OccupancyBuffer` preserves overlapping evidence across a move() and seeds the
 // decay clock on the first decay() call.
 //
@@ -73,15 +75,12 @@ inline std::size_t accumulate_frame(
     project_observations_inverse(
       mask_rgb8, camera_model, camera_origin, rotation_cam_to_target,
       params.max_range, boat_x, boat_y, params.res, params.half_extent,
-      params.plane_z, params.min_grazing_angle_deg);
+      params.plane_z, params.min_grazing_angle_deg,
+      params.obstacle_prob_min, params.max_evidence_step);
 
   for (const auto & o : observations) {
     const grid_map::Position p(o.x, o.y);
-    if (o.obstacle) {
-      buffer.hit(p);
-    } else {
-      buffer.miss(p);
-    }
+    buffer.accumulate(p, o.log_odds);  // graded evidence (signed)
   }
   return observations.size();
 }

@@ -15,10 +15,10 @@ namespace sea_surface_segmentation
 // reconfigurable on the live layer (validated via `validate()` before apply).
 struct OccupancyParams
 {
-  double hit_log_odds = 0.85;       // added to a cell on an obstacle observation
-  double miss_log_odds = -0.40;     // added on a free-space (water) observation; negative
-  double clamp = 5.0;               // |log-odds| bound, so evidence stays revisable (no saturation)
-  double lethal_threshold = 1.0;    // log-odds >= this => the cell reads as a lethal obstacle
+  double obstacle_clamp = 5.0;      // upper log-odds bound, so evidence stays revisable (no saturation)
+  double clear_floor = -2.0;        // lower (negative) log-odds bound for water/free evidence
+  double free_threshold = 0.0;      // log-odds <= this => no obstacle opinion (occupancy -1)
+  double lethal_threshold = 1.0;    // log-odds >= this => the cell reads as a lethal obstacle (occupancy 100)
   double decay_half_life_s = 30.0;  // unobserved evidence halves every this many seconds
 };
 
@@ -46,17 +46,34 @@ public:
     map_["log_odds"].setConstant(NAN);  // start fully unobserved
   }
 
+  // Wrap an existing GridMap (must carry a "log_odds" layer) + params. Used by
+  // the layer's publish path to run the read-only occupancy scan off-lock
+  // against a deep-copied snapshot while still going through `occupancyAt`.
+  // Decay state starts unseeded; this constructor is for read-only snapshots.
+  OccupancyBuffer(grid_map::GridMap map, const OccupancyParams & params)
+  : map_(std::move(map)), params_(params) {}
+
   // Roll the window so it re-centers on `position`. Overlapping cells keep their
   // accumulated evidence at the same world location; newly-exposed cells are NaN
   // (unobserved). Sub-cell motion is absorbed by grid_map's internal offset, so a
   // sequence of fractional-meter shifts does not drift evidence to a wrong cell.
   bool move(const grid_map::Position & position) { return map_.move(position); }
 
-  // Accumulate an obstacle observation at `position` (clamped log-odds).
-  bool hit(const grid_map::Position & position) { return apply(position, params_.hit_log_odds); }
-
-  // Accumulate a free-space (water) observation at `position` (clamped log-odds).
-  bool miss(const grid_map::Position & position) { return apply(position, params_.miss_log_odds); }
+  // Accumulate a graded log-odds `increment` (signed) at `position`. The result
+  // is clamped to [clear_floor, obstacle_clamp]. NaN (unobserved) reads as the
+  // prior (0) before adding. Returns false (no-op) if the position is outside
+  // the window OR the increment is non-finite — a NaN/Inf increment must never
+  // be stored: std::clamp would propagate the NaN, turning an observed cell back
+  // into "unobserved" and silently dropping accumulated evidence.
+  bool accumulate(const grid_map::Position & position, double increment)
+  {
+    if (!map_.isInside(position) || !std::isfinite(increment)) { return false; }
+    float & v = map_.atPosition("log_odds", position);
+    const double current = std::isfinite(v) ? static_cast<double>(v) : 0.0;  // NaN => prior
+    v = static_cast<float>(
+      std::clamp(current + increment, params_.clear_floor, params_.obstacle_clamp));
+    return true;
+  }
 
   // Decay all observed cells toward the prior based on wall-clock elapsed time.
   // Call once per update cycle with the current time; the first call only seeds
@@ -83,6 +100,29 @@ public:
     if (!map_.isInside(position)) { return false; }
     const float v = map_.atPosition("log_odds", position);
     return std::isfinite(v) && static_cast<double>(v) >= params_.lethal_threshold;
+  }
+
+  // Graded occupancy at `position`, in the published-OccupancyGrid convention:
+  //   - unobserved (NaN) or outside the window → -1 ("no opinion")
+  //   - log-odds <= free_threshold            → -1 (we only ADD cost; clearing
+  //                                                 unknown/free is left to other
+  //                                                 layers)
+  //   - log-odds >= lethal_threshold          → 100 (lethal)
+  //   - otherwise a linear ramp 1..99 across (free_threshold, lethal_threshold)
+  // Pure logic — no nav2 cost mapping here (see cost_mapping.hpp).
+  int occupancyAt(const grid_map::Position & position) const
+  {
+    if (!map_.isInside(position)) { return -1; }
+    const float vf = map_.atPosition("log_odds", position);
+    if (!std::isfinite(vf)) { return -1; }
+    const double v = static_cast<double>(vf);
+    if (v <= params_.free_threshold) { return -1; }
+    if (v >= params_.lethal_threshold) { return 100; }
+    const double frac =
+      (v - params_.free_threshold) /
+      (params_.lethal_threshold - params_.free_threshold);
+    const long occ = 1 + std::lround(frac * 98.0);
+    return static_cast<int>(std::clamp<long>(occ, 1, 99));
   }
 
   // Raw log-odds at `position`; NaN if unobserved or outside the window.
@@ -114,39 +154,40 @@ public:
   // returns false and sets `why`.
   static bool validate(const OccupancyParams & p, std::string & why)
   {
-    if (!std::isfinite(p.hit_log_odds) || p.hit_log_odds <= 0.0) {
-      why = "hit_log_odds must be finite and > 0"; return false;
+    if (!std::isfinite(p.obstacle_clamp) || p.obstacle_clamp <= 0.0) {
+      why = "obstacle_clamp must be finite and > 0"; return false;
     }
-    if (!std::isfinite(p.miss_log_odds) || p.miss_log_odds >= 0.0) {
-      why = "miss_log_odds must be finite and < 0"; return false;
-    }
-    if (!std::isfinite(p.clamp) || p.clamp <= 0.0) {
-      why = "clamp must be finite and > 0"; return false;
-    }
-    if (!std::isfinite(p.lethal_threshold) || p.lethal_threshold <= 0.0 ||
-      p.lethal_threshold > p.clamp)
-    {
-      // Lower bound matters: a threshold of 0 makes a single hit lethal (defeats
-      // flicker rejection); a negative one makes a water `miss` read lethal — a
-      // safety inversion on an obstacle layer.
-      why = "lethal_threshold must be finite and in (0, clamp]"; return false;
+    if (!std::isfinite(p.clear_floor) || p.clear_floor >= 0.0) {
+      why = "clear_floor must be finite and < 0"; return false;
     }
     if (!std::isfinite(p.decay_half_life_s) || p.decay_half_life_s <= 0.0) {
       why = "decay_half_life_s must be finite and > 0"; return false;
+    }
+    if (!std::isfinite(p.free_threshold)) {
+      why = "free_threshold must be finite"; return false;
+    }
+    if (!std::isfinite(p.lethal_threshold)) {
+      why = "lethal_threshold must be finite"; return false;
+    }
+    // free_threshold < lethal_threshold <= obstacle_clamp. A non-positive
+    // ordering here would invert the ramp / make a single observation lethal /
+    // place the lethal level above the clamp (unreachable).
+    if (!(p.free_threshold < p.lethal_threshold) ||
+      !(p.lethal_threshold <= p.obstacle_clamp))
+    {
+      why = "require free_threshold < lethal_threshold <= obstacle_clamp"; return false;
+    }
+    // clear_floor must sit at or below free_threshold, so a maximally-cleared
+    // (floored) water cell reads as "no opinion" (occupancyAt → -1). If
+    // free_threshold were below clear_floor, even fully-cleared water would
+    // floor ABOVE free_threshold and publish a positive (soft-obstacle) cost.
+    if (!(p.clear_floor <= p.free_threshold)) {
+      why = "require clear_floor <= free_threshold"; return false;
     }
     return true;
   }
 
 private:
-  bool apply(const grid_map::Position & position, double increment)
-  {
-    if (!map_.isInside(position)) { return false; }
-    float & v = map_.atPosition("log_odds", position);
-    const double current = std::isfinite(v) ? static_cast<double>(v) : 0.0;  // NaN => prior
-    v = static_cast<float>(std::clamp(current + increment, -params_.clamp, params_.clamp));
-    return true;
-  }
-
   grid_map::GridMap map_;
   OccupancyParams params_;
   double last_decay_s_ = 0.0;

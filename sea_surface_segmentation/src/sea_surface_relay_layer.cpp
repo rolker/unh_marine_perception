@@ -12,23 +12,26 @@
 #include "nav2_costmap_2d/layer.hpp"
 #include "nav2_costmap_2d/layered_costmap.hpp"
 
+#include "sea_surface_segmentation/cost_mapping.hpp"
+
 namespace sea_surface_layer
 {
 
-// Thin costmap layer that stamps LETHAL where a peer SeaSurfaceLayer (running
-// in a different costmap, typically local) has published its lethal cells.
+// Thin costmap layer that relays a peer SeaSurfaceLayer's published graded
+// occupancy (running in a different costmap, typically local) into this costmap.
 //
 // Why a relay instead of a second SeaSurfaceLayer in the global costmap: the
 // segmentation projection is the expensive step (N cameras × image-size
 // iterations per frame); running it twice (once per costmap) would double the
-// cost for no information gain since both costmaps end up with the same lethal
-// cells. The producer publishes once; this consumer copies. Mirrors the
-// s57_grids / s57_layer producer/consumer pattern.
+// cost for no information gain since both costmaps end up with the same cells.
+// The producer publishes once; this consumer copies. Mirrors the s57_grids /
+// s57_layer producer/consumer pattern.
 //
-// Only the LETHAL cells are stamped. Sub-threshold and unobserved cells (-1 in
-// the published OccupancyGrid) are left untouched so the relay never clears
-// another layer's marks — the global costmap's chart/inflation contributions
-// stay authoritative; sea-surface only ADDS.
+// The full graded gradient is relayed: each published cell maps through
+// `occupancy_to_cost` to a soft cost (1..252) or LETHAL (254). Unobserved /
+// no-opinion cells (-1, or any occupancy <= 0) map to "leave untouched", so the
+// relay never clears another layer's marks — the global costmap's
+// chart/inflation contributions stay authoritative; sea-surface only ADDS.
 class SeaSurfaceRelayLayer: public nav2_costmap_2d::Layer
 {
 public:
@@ -136,10 +139,21 @@ public:
         if (x >= mw || y >= mh) {
           continue;
         }
-        if (msg->data[static_cast<size_t>(y) * mw + x] >= 100) {
-          master_grid.setCost(
-            static_cast<unsigned int>(i), static_cast<unsigned int>(j),
-            nav2_costmap_2d::LETHAL_OBSTACLE);
+        const int occ = msg->data[static_cast<size_t>(y) * mw + x];
+        const int c = sea_surface_segmentation::occupancy_to_cost(occ);
+        if (c < 0) {
+          continue;  // no opinion — leave the master cell untouched
+        }
+        // Combine with MAX (nav2 updateWithMax semantics): only raise a known
+        // cost, write over unknown. A relayed soft cost must never downgrade a
+        // stronger upstream mark — the relay only ADDS, like the producer.
+        const unsigned int mi = static_cast<unsigned int>(i);
+        const unsigned int mj = static_cast<unsigned int>(j);
+        const unsigned char old_cost = master_grid.getCost(mi, mj);
+        if (old_cost == nav2_costmap_2d::NO_INFORMATION ||
+          old_cost < static_cast<unsigned char>(c))
+        {
+          master_grid.setCost(mi, mj, static_cast<unsigned char>(c));
         }
       }
     }

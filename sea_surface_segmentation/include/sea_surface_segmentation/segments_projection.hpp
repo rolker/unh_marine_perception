@@ -8,6 +8,7 @@
 // so they all compute the costmap with the real code. See
 // rolker/unh_marine_perception#23.
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +19,38 @@
 #include "image_geometry/pinhole_camera_model.hpp"
 
 namespace sea_surface_segmentation {
+
+// Per-observation log-odds increment for a pixel with red value `R` (0..255 =
+// 255·P(obstacle) from the per-pixel softmax). A prior-shifted, capped logit:
+//
+//   logit_R     = ln((R + eps) / (255 - R + eps))   — observed evidence in log-odds
+//   logit_prior = ln(prob_min / (1 - prob_min))     — the decision prior
+//   d           = logit_R - logit_prior             — zero-crossing at P(obs)==prob_min
+//
+// Shifting by the prior puts the zero-crossing at `obstacle_prob_min` rather than
+// 0.5, so a buoy where water is marginally more likely (e.g. P_obs=0.47 with
+// prob_min=0.35) still contributes POSITIVE evidence. `max_step` caps any single
+// frame for flicker rejection (and preserves ~2-frame-to-lethal at defaults).
+//
+// Defensive: this is an exported utility also called by offline tools/tuners
+// (rolker/unh_marine_perception#23) that don't run the layer's parameter
+// validation. Out-of-range inputs return 0.0 (contribute no evidence) rather
+// than feeding NaN/Inf — or tripping std::clamp's lo<=hi precondition — into the
+// occupancy buffer. The live layer still validates these at init + on set.
+inline double pixel_log_odds(int R, double obstacle_prob_min, double max_step)
+{
+  if (R < 0) { R = 0; } else if (R > 255) { R = 255; }
+  if (!(obstacle_prob_min > 0.0 && obstacle_prob_min < 1.0) ||
+    !std::isfinite(max_step) || max_step <= 0.0)
+  {
+    return 0.0;  // invalid params — no opinion rather than NaN/Inf/UB
+  }
+  const double eps = 0.5;
+  const double logit_R     = std::log((R + eps) / (255.0 - R + eps));
+  const double logit_prior = std::log(obstacle_prob_min / (1.0 - obstacle_prob_min));
+  double d = logit_R - logit_prior;          // zero-crossing at P(obs)==obstacle_prob_min
+  return std::clamp(d, -max_step, max_step);
+}
 
 // One projected obstacle point in the target frame (3D) with the
 // red-channel intensity copied through from the mask pixel.
@@ -249,6 +282,7 @@ struct OccupancyObservation
   double x;
   double y;
   bool obstacle;
+  double log_odds = 0.0;  // graded per-observation evidence increment (signed)
 };
 
 // Back-project a segmentation mask into ground-plane occupancy observations for
@@ -324,7 +358,11 @@ inline std::vector<OccupancyObservation> project_observations(
       if (std::sqrt(dx * dx + dy * dy + dz * dz) > max_range) {
         continue;  // beyond sensor range
       }
-      observations.push_back({wx, wy, obstacle_obs});
+      // Forward path is not the live costmap path; populate log_odds for
+      // self-consistency only, using a neutral 0.5 prior so a red-dominant
+      // pixel yields positive and water yields negative evidence.
+      observations.push_back(
+        {wx, wy, obstacle_obs, pixel_log_odds(pixel_value[0], 0.5, 0.85)});
     }
   }
 
@@ -359,13 +397,31 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
   double max_range,
   double cx, double cy, double res, double half_extent,
   double plane_z = 0.0,
-  double min_grazing_angle_deg = 0.0)
+  double min_grazing_angle_deg = 0.0,
+  double obstacle_prob_min = 0.5,
+  double max_evidence_step = 0.85)
 {
-  // Lowest (nearest) waterline contact per column — same primitive as forward.
+  // Graded obstacle gate: a pixel counts as obstacle-ish when its red channel
+  // (255·P(obstacle)) implies P(obstacle) >= obstacle_prob_min. Replaces the
+  // argmax `is_obstacle_pixel`/`is_waterline_contact_pixel` gate on the costmap
+  // path so marginal-but-positive evidence (e.g. a buoy where water is barely
+  // more likely) is not silently dropped before the graded log-odds step.
+  auto is_obstacle_ish = [&](const cv::Vec3b & px) {
+    return px[0] >= obstacle_prob_min * 255.0;
+  };
+
+  // Lowest (largest-row) obstacle-ish pixel per column whose pixel directly
+  // below is NOT obstacle-ish (or which sits on the bottom row). Same waterline
+  // contact geometry as forward, but using the graded gate.
   std::vector<int> contact_row(mask_rgb8.cols, -1);
   for (int col = 0; col < mask_rgb8.cols; ++col) {
     for (int row = mask_rgb8.rows - 1; row >= 0; --row) {
-      if (is_waterline_contact_pixel(mask_rgb8, row, col)) {
+      if (!is_obstacle_ish(mask_rgb8.at<cv::Vec3b>(row, col))) {
+        continue;
+      }
+      if (row + 1 >= mask_rgb8.rows ||
+        !is_obstacle_ish(mask_rgb8.at<cv::Vec3b>(row + 1, col)))
+      {
         contact_row[col] = row;
         break;
       }
@@ -402,13 +458,17 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
       const int v = static_cast<int>(std::lround(uv.y));
       if (u < 0 || u >= mask_rgb8.cols || v < 0 || v >= mask_rgb8.rows) { continue; }
       const cv::Vec3b px = mask_rgb8.at<cv::Vec3b>(v, u);
-      if (is_obstacle_pixel(px)) {
+      if (is_obstacle_ish(px)) {
         if (v == contact_row[u]) {
-          observations.push_back({wx, wy, true});         // waterline contact → hit
+          observations.push_back(
+            {wx, wy, true,
+             pixel_log_odds(px[0], obstacle_prob_min, max_evidence_step)});  // waterline contact → +evidence
         }
         // else: above (or below an unselected) contact = body → leave unobserved
       } else if (px[1] > px[0] && px[1] > px[2]) {        // green-dominant = water
-        observations.push_back({wx, wy, false});          // positively observed water → miss
+        observations.push_back(
+          {wx, wy, false,
+           pixel_log_odds(px[0], obstacle_prob_min, max_evidence_step)});  // observed water → -evidence
       }
       // else: sky (blue-dominant) or ambiguous → skip (no observation)
     }

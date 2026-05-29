@@ -19,6 +19,7 @@
 #include "nav2_costmap_2d/layer.hpp"
 #include "nav2_costmap_2d/layered_costmap.hpp"
 
+#include "sea_surface_segmentation/cost_mapping.hpp"
 #include "sea_surface_segmentation/occupancy_buffer.hpp"
 #include "sea_surface_segmentation/segments_projection.hpp"
 
@@ -88,17 +89,48 @@ public:
       min_grazing_angle_deg_ = 0.0;
     }
 
-    // Log-odds occupancy parameters (runtime-tunable wiring is phase 6).
-    declareParameter("hit_log_odds", rclcpp::ParameterValue(params_.hit_log_odds));
-    node->get_parameter(name_ + ".hit_log_odds", params_.hit_log_odds);
-    declareParameter("miss_log_odds", rclcpp::ParameterValue(params_.miss_log_odds));
-    node->get_parameter(name_ + ".miss_log_odds", params_.miss_log_odds);
-    declareParameter("clamp", rclcpp::ParameterValue(params_.clamp));
-    node->get_parameter(name_ + ".clamp", params_.clamp);
+    // Graded log-odds occupancy parameters (all runtime-tunable).
+    declareParameter("obstacle_clamp", rclcpp::ParameterValue(params_.obstacle_clamp));
+    node->get_parameter(name_ + ".obstacle_clamp", params_.obstacle_clamp);
+    declareParameter("clear_floor", rclcpp::ParameterValue(params_.clear_floor));
+    node->get_parameter(name_ + ".clear_floor", params_.clear_floor);
+    declareParameter("free_threshold", rclcpp::ParameterValue(params_.free_threshold));
+    node->get_parameter(name_ + ".free_threshold", params_.free_threshold);
     declareParameter("lethal_threshold", rclcpp::ParameterValue(params_.lethal_threshold));
     node->get_parameter(name_ + ".lethal_threshold", params_.lethal_threshold);
     declareParameter("decay_half_life_s", rclcpp::ParameterValue(params_.decay_half_life_s));
     node->get_parameter(name_ + ".decay_half_life_s", params_.decay_half_life_s);
+
+    // Graded evidence-model knobs (live-tunable). `obstacle_prob_min` shifts the
+    // zero-crossing of the per-pixel logit; `max_evidence_step` caps any single
+    // frame's contribution. Read fresh each segmentsCallback under the lock.
+    declareParameter("obstacle_prob_min", rclcpp::ParameterValue(obstacle_prob_min_));
+    node->get_parameter(name_ + ".obstacle_prob_min", obstacle_prob_min_);
+    declareParameter("max_evidence_step", rclcpp::ParameterValue(max_evidence_step_));
+    node->get_parameter(name_ + ".max_evidence_step", max_evidence_step_);
+
+    // Validate the projection knobs at startup (they live on the layer, not in
+    // OccupancyParams, so OccupancyBuffer::validate below doesn't cover them).
+    // Mirror the runtime onParametersSet checks + the min_grazing_angle_deg
+    // clamp-to-default pattern: a bad YAML value must not flow into the logit
+    // math. obstacle_prob_min must be in (0,1) — 0 or 1 makes logit(prior) ±inf
+    // (saturates / disables grading) and NaN silently disables the whole layer;
+    // max_evidence_step must be finite and > 0 (a negative gives std::clamp
+    // lo > hi, which is UB).
+    if (!std::isfinite(obstacle_prob_min_) ||
+      obstacle_prob_min_ <= 0.0 || obstacle_prob_min_ >= 1.0)
+    {
+      RCLCPP_WARN_STREAM(
+        logger_, "Invalid obstacle_prob_min (" << obstacle_prob_min_
+          << "); must be in (0, 1). Using default 0.35.");
+      obstacle_prob_min_ = 0.35;
+    }
+    if (!std::isfinite(max_evidence_step_) || max_evidence_step_ <= 0.0) {
+      RCLCPP_WARN_STREAM(
+        logger_, "Invalid max_evidence_step (" << max_evidence_step_
+          << "); must be finite and > 0. Using default 0.85.");
+      max_evidence_step_ = 0.85;
+    }
 
     std::string why;
     if (!sea_surface_segmentation::OccupancyBuffer::validate(params_, why)) {
@@ -191,8 +223,9 @@ public:
     }
 
     // Live-tunable params via `ros2 param set` (phase 6). Decay half-life,
-    // hit/miss increments, clamp, lethal threshold, and maximum_range all
-    // reconfigure at runtime; topic and source-list params stay configure-time
+    // obstacle_clamp, clear_floor, free/lethal thresholds, obstacle_prob_min,
+    // max_evidence_step, and maximum_range all reconfigure at runtime; topic
+    // and source-list params stay configure-time
     // (subscriber re-bind is not supported here). The callback validates the
     // proposed change before applying — a fat-fingered set can't silently
     // poison the buffer interpretation.
@@ -280,16 +313,30 @@ public:
     if (!buffer_) {
       return;
     }
-    // Stamp LETHAL into the master where the buffer has crossed the threshold.
-    // Leave everything else untouched (other layers + inflation own free/unknown).
+    // Stamp the graded cost into the master from the buffer's occupancy ramp:
+    // LETHAL at the lethal threshold, a soft cost below it, and nothing where the
+    // buffer has no obstacle opinion (occ <= 0 → cost -1). We only ADD; free /
+    // unknown remain owned by other layers + inflation.
     for (int i = min_i; i < max_i; ++i) {
       for (int j = min_j; j < max_j; ++j) {
         double wx, wy;
         master_grid.mapToWorld(static_cast<unsigned int>(i), static_cast<unsigned int>(j), wx, wy);
-        if (buffer_->isLethal(grid_map::Position(wx, wy))) {
-          master_grid.setCost(
-            static_cast<unsigned int>(i), static_cast<unsigned int>(j),
-            nav2_costmap_2d::LETHAL_OBSTACLE);
+        const int occ = buffer_->occupancyAt(grid_map::Position(wx, wy));
+        const int c = sea_surface_segmentation::occupancy_to_cost(occ);
+        if (c < 0) {
+          continue;  // no obstacle opinion — leave the master cell untouched
+        }
+        // Combine with MAX (nav2 updateWithMax semantics): only raise a known
+        // cost, and write over unknown. A graded soft cost (1..252) must never
+        // downgrade another layer's INSCRIBED / LETHAL mark — sea-surface only
+        // ADDS risk.
+        const unsigned int mi = static_cast<unsigned int>(i);
+        const unsigned int mj = static_cast<unsigned int>(j);
+        const unsigned char old_cost = master_grid.getCost(mi, mj);
+        if (old_cost == nav2_costmap_2d::NO_INFORMATION ||
+          old_cost < static_cast<unsigned char>(c))
+        {
+          master_grid.setCost(mi, mj, static_cast<unsigned char>(c));
         }
       }
     }
@@ -358,12 +405,16 @@ private:
     double res;
     double maximum_range;
     double min_grazing_deg;
+    double obstacle_prob_min;
+    double max_evidence_step;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       camera_model = src.camera_model;
       res = resolution_;
       maximum_range = maximum_range_;
       min_grazing_deg = min_grazing_angle_deg_;
+      obstacle_prob_min = obstacle_prob_min_;
+      max_evidence_step = max_evidence_step_;
     }
     if (!camera_model || res <= 0.0) {
       return;
@@ -399,7 +450,7 @@ private:
       const auto observations = sea_surface_segmentation::project_observations_inverse(
         image->image, *camera_model, camera_origin, rotation_cam_to_world,
         maximum_range, camera_origin[0], camera_origin[1], res, maximum_range,
-        /*plane_z=*/0.0, min_grazing_deg);
+        /*plane_z=*/0.0, min_grazing_deg, obstacle_prob_min, max_evidence_step);
 
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       if (!buffer_) {
@@ -407,11 +458,7 @@ private:
       }
       for (const auto & obs : observations) {
         const grid_map::Position p(obs.x, obs.y);
-        if (obs.obstacle) {
-          buffer_->hit(p);
-        } else {
-          buffer_->miss(p);
-        }
+        buffer_->accumulate(p, obs.log_odds);  // graded evidence (signed)
       }
       // Mark the layer current so LayeredCostmap::isCurrent() doesn't report a
       // stale layer once a frame has been ingested. Stays true once set — the
@@ -450,13 +497,13 @@ private:
     src.camera_model = model;
   }
 
-  // Publish the lethal-cell mask as a nav_msgs/OccupancyGrid so a downstream
-  // `SeaSurfaceRelayLayer` (or any consumer) can stamp the same lethal cells
+  // Publish the graded occupancy as a nav_msgs/OccupancyGrid so a downstream
+  // `SeaSurfaceRelayLayer` (or any consumer) can stamp the same graded gradient
   // into a different costmap without rerunning the segmentation projection.
-  // Cells at or above the lethal threshold publish as 100; everything else
-  // (unobserved or sub-threshold) publishes as -1 ("no opinion") so the
-  // consumer never inadvertently clears another layer's marks. Header frame
-  // is the costmap's global frame (e.g. `map_tide`).
+  // Each cell carries its `occupancyAt` value: 100 at the lethal threshold, a
+  // soft 1..99 ramp below it, and -1 ("no opinion") where the buffer has no
+  // obstacle evidence, so the consumer never inadvertently clears another
+  // layer's marks. Header frame is the costmap's global frame (e.g. `map_tide`).
   void publishLethalGrid()
   {
     if (!lethal_publisher_) {
@@ -474,15 +521,21 @@ private:
     // — 160 kB on the same 200×200) — far cheaper than holding the lock
     // through the scan.
     grid_map::GridMap map_copy;
-    double threshold;
+    sea_surface_segmentation::OccupancyParams occ_params;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       if (!buffer_) {
         return;
       }
       map_copy = buffer_->map();  // grid_map copy assignment = deep copy of Eigen data
-      threshold = params_.lethal_threshold;
+      occ_params = params_;
     }
+    // Standalone copy of the buffer so the O(W*H) occupancy scan runs off-lock
+    // against the snapshot, yet still goes through `occupancyAt` (single source
+    // of the graded ramp). The OccupancyBuffer is move-cheap (it holds the
+    // GridMap we already deep-copied); rebuilding around `map_copy` avoids a
+    // duplicate ramp implementation here.
+    sea_surface_segmentation::OccupancyBuffer snapshot(map_copy, occ_params);
 
     nav_msgs::msg::OccupancyGrid msg;
     msg.header.stamp = node->now();
@@ -510,13 +563,8 @@ private:
         const double wx = msg.info.origin.position.x + (x + 0.5) * msg.info.resolution;
         const double wy = msg.info.origin.position.y + (y + 0.5) * msg.info.resolution;
         const grid_map::Position p(wx, wy);
-        if (!map_copy.isInside(p)) {
-          continue;
-        }
-        const float v = map_copy.atPosition("log_odds", p);
-        if (std::isfinite(v) && static_cast<double>(v) >= threshold) {
-          msg.data[static_cast<size_t>(y) * msg.info.width + x] = 100;
-        }
+        msg.data[static_cast<size_t>(y) * msg.info.width + x] =
+          static_cast<int8_t>(snapshot.occupancyAt(p));
       }
     }
 
@@ -542,11 +590,15 @@ private:
     sea_surface_segmentation::OccupancyParams candidate_occ;
     double candidate_max_range;
     double candidate_min_grazing_deg;
+    double candidate_obstacle_prob_min;
+    double candidate_max_evidence_step;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       candidate_occ = params_;
       candidate_max_range = maximum_range_;
       candidate_min_grazing_deg = min_grazing_angle_deg_;
+      candidate_obstacle_prob_min = obstacle_prob_min_;
+      candidate_max_evidence_step = max_evidence_step_;
     }
 
     // Configure-time params — subscriber re-bind / publisher re-bind isn't
@@ -590,16 +642,32 @@ private:
           return result;
         }
 
-        if (n == name_ + ".hit_log_odds") {
-          candidate_occ.hit_log_odds = p.as_double();
-        } else if (n == name_ + ".miss_log_odds") {
-          candidate_occ.miss_log_odds = p.as_double();
-        } else if (n == name_ + ".clamp") {
-          candidate_occ.clamp = p.as_double();
+        if (n == name_ + ".obstacle_clamp") {
+          candidate_occ.obstacle_clamp = p.as_double();
+        } else if (n == name_ + ".clear_floor") {
+          candidate_occ.clear_floor = p.as_double();
+        } else if (n == name_ + ".free_threshold") {
+          candidate_occ.free_threshold = p.as_double();
         } else if (n == name_ + ".lethal_threshold") {
           candidate_occ.lethal_threshold = p.as_double();
         } else if (n == name_ + ".decay_half_life_s") {
           candidate_occ.decay_half_life_s = p.as_double();
+        } else if (n == name_ + ".obstacle_prob_min") {
+          const double v = p.as_double();
+          if (!std::isfinite(v) || v <= 0.0 || v >= 1.0) {
+            result.successful = false;
+            result.reason = "obstacle_prob_min must be finite and in (0, 1)";
+            return result;
+          }
+          candidate_obstacle_prob_min = v;
+        } else if (n == name_ + ".max_evidence_step") {
+          const double v = p.as_double();
+          if (!std::isfinite(v) || v <= 0.0) {
+            result.successful = false;
+            result.reason = "max_evidence_step must be finite and > 0";
+            return result;
+          }
+          candidate_max_evidence_step = v;
         } else if (n == name_ + ".maximum_range") {
           const double v = p.as_double();
           if (!std::isfinite(v) || v <= 0.0) {
@@ -635,6 +703,8 @@ private:
     params_ = candidate_occ;
     maximum_range_ = candidate_max_range;
     min_grazing_angle_deg_ = candidate_min_grazing_deg;
+    obstacle_prob_min_ = candidate_obstacle_prob_min;
+    max_evidence_step_ = candidate_max_evidence_step;
     if (buffer_) {
       buffer_->setParams(params_);
     }
@@ -653,6 +723,9 @@ private:
 
   double maximum_range_ = 100.0;
   double min_grazing_angle_deg_ = 0.0;  // 0 = filter off (back-compat)
+  // Graded evidence-model knobs (live-tunable; snapshotted per segmentsCallback).
+  double obstacle_prob_min_ = 0.35;
+  double max_evidence_step_ = 0.85;
   sea_surface_segmentation::OccupancyParams params_;
   std::unique_ptr<sea_surface_segmentation::OccupancyBuffer> buffer_;
 
