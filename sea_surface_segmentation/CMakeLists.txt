@@ -109,7 +109,6 @@ pluginlib_export_plugin_description_file(nav2_costmap_2d costmap_plugins.xml)
 
 install(
   TARGETS sea_surface_layer
-  EXPORT export_sea_surface_layer
   DESTINATION lib
 )
 

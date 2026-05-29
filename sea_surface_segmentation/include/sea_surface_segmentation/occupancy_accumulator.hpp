@@ -50,8 +50,11 @@ struct AccumulateParams
 // `OccupancyBuffer` preserves overlapping evidence across a move() and seeds the
 // decay clock on the first decay() call.
 //
-// Returns the number of observations applied to the buffer (hits + misses) —
-// useful for per-camera "did this frame contribute anything" diagnostics.
+// Returns the number of observations this frame produced (hits + misses) — for
+// per-camera "did this frame contribute anything" diagnostics. Note this counts
+// observations the projection emitted, including any that fall outside the buffer
+// window (where hit()/miss() are no-ops); this matches the tool's original
+// per-observation tally.
 inline std::size_t accumulate_frame(
   OccupancyBuffer & buffer,
   const cv::Mat & mask_rgb8,

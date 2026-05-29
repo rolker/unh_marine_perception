@@ -192,3 +192,33 @@ TEST(AccumulateFrame, DecayAttenuatesPriorHitBetweenFrames)
     params.hit_log_odds * 0.5, 1e-3)
     << "decay() must attenuate prior evidence by the half-life factor before ingest";
 }
+
+// Locks the decay-BEFORE-ingest ordering, which the test above does not (its
+// frame 2 ingests nothing). move() and decay() commute on the overlap (decay is
+// a uniform scalar multiply, move only relabels world positions), so the
+// behaviourally-significant order is that this frame's fresh hit is applied
+// AFTER decay, not decayed itself. Frame 1 hits (0,0)=0.85 at t=100; frame 2
+// re-hits (0,0) one half-life later. Correct order: decay 0.85→0.425, then add a
+// fresh 0.85 → 1.275. If decay ran after ingest it would be (0.85+0.85)*0.5 =
+// 0.85 — so this value distinguishes the two orderings.
+TEST(AccumulateFrame, DecayPrecedesFreshIngest)
+{
+  OccupancyParams params;
+  params.decay_half_life_s = 10.0;
+  auto buffer = make_buffer(params);
+  const auto model = make_small_nadir_camera();
+
+  cv::Mat contact = all_water();
+  contact.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);
+  accumulate_frame(buffer, contact, model, kNadirOrigin, nadir_rotation(),
+    0.0, 0.0, /*stamp_s=*/100.0, acc_params());
+  ASSERT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), params.hit_log_odds, kLogOddsTol);
+
+  // Same contact, one half-life later: decay the prior hit, THEN add the fresh one.
+  accumulate_frame(buffer, contact, model, kNadirOrigin, nadir_rotation(),
+    0.0, 0.0, /*stamp_s=*/110.0, acc_params());
+
+  EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)),
+    params.hit_log_odds * 0.5 + params.hit_log_odds, 1e-3)
+    << "fresh hit must be applied after decay, not decayed with the prior evidence";
+}
