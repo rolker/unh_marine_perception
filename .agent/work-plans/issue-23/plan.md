@@ -57,15 +57,15 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
    `ament_export_dependencies(grid_map_core image_geometry nav2_costmap_2d
    OpenCV)` — **OpenCV is a public dep**: `segments_projection.hpp` directly
    `#include <opencv2/core.hpp>` and exposes `cv::Mat`/`cv::Vec3b` in its API, and
-   `accumulate_frame` takes `cv::Mat`. Also add `ament_export_targets(
-   export_sea_surface_layer HAS_LIBRARY_TARGET)` — the `EXPORT` set is installed
-   today (`CMakeLists.txt:104-108`) but never ament-exported; not required for the
-   tuner's header-only consumption (it links nothing from this pkg) but closes a
-   pre-existing gap cheaply. Update the four `target_include_directories(... /src)`
-   lines that feed the moved headers (`bag_to_costmap_video`, `test_segments_apply`,
-   `test_segments_projection`, `test_occupancy_buffer`) to use `include/`; leave
-   `test_frame_id_resolver` on `/src`. Fix the now-stale "private to the layer /
-   lives next to its .cpp in src/" comments.
+   `accumulate_frame` takes `cv::Mat`. Do **not** `ament_export_targets` the
+   `sea_surface_layer` library — see Implementation Notes (the step-8 check proved
+   it breaks header-only consumers). For the build-time include path, add a single
+   global `include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)` (consistent
+   with the existing global grid_map_core include) so the layer lib, both nodes,
+   the tool, and the gtests all resolve the moved headers; this lets the redundant
+   per-target `target_include_directories(... /src)` on the three moved-header
+   gtests + the tool be removed (`test_frame_id_resolver` keeps `/src`). Fix the
+   now-stale "private to the layer / lives next to its .cpp in src/" comments.
 
    **grid_map_core compile fragility (verify downstream):** `CMakeLists.txt:21-27`
    documents that grid_map_core's extras inject `-DEIGEN_*_PLUGIN` globally, so
@@ -102,6 +102,10 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
    ordering and exported deps actually reach a downstream build. If it fails,
    capture the required workaround in the package's exported-API notes before
    marking #23 done. (This is what `marine_perception_tools#1` will rely on.)
+   **Done:** throwaway `ssc_consumer` (in `/tmp`, not committed) builds clean —
+   grid_map_core's `EIGEN_PLUGIN` ordering + opencv/image_geometry deps reach
+   downstream; no workaround needed. The check first FAILED and caught a real bug
+   (see Implementation Notes).
 
 ## Files to Change
 
@@ -113,7 +117,7 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
 | `src/sea_surface_layer.cpp`, `src/segments_to_pointcloud.cpp` | Fix include paths (3 total) |
 | `test/test_{occupancy_buffer,segments_projection,segments_apply}.cpp` | Fix include paths |
 | `test/test_occupancy_accumulator.cpp` | New unit test for the driver |
-| `CMakeLists.txt` | `install(DIRECTORY include/)`, `ament_export_include_directories`, `ament_export_dependencies(grid_map_core image_geometry nav2_costmap_2d OpenCV)`, `ament_export_targets(export_sea_surface_layer HAS_LIBRARY_TARGET)`, repoint test/tool include dirs, new gtest, fix stale comments |
+| `CMakeLists.txt` | global `include_directories(include)`, `install(DIRECTORY include/)`, `ament_export_include_directories`, `ament_export_dependencies(grid_map_core image_geometry nav2_costmap_2d OpenCV)`, drop redundant per-target `/src` includes, new gtest, fix stale comments (no `ament_export_targets` — see Implementation Notes) |
 
 ## Principles Self-Check
 
@@ -169,3 +173,27 @@ currently has **no** `ament_export_include_directories`/`ament_export_dependenci
 ## Estimated Scope
 
 Single PR.
+
+## Implementation Notes
+
+- **No `ament_export_targets` for the `sea_surface_layer` library (design pivot).**
+  The plan-review suggested exporting the install `EXPORT` set "for completeness."
+  The step-8 downstream check proved that's wrong: `ament_export_targets(...
+  HAS_LIBRARY_TARGET)` puts the layer's full link interface
+  (`cv_bridge::cv_bridge`, `rclcpp`, `tf2_ros`, …) into the downstream
+  `find_package`, and those targets aren't resolved → the consumer's CMake errors
+  out (`target ... cv_bridge::cv_bridge not found`). The layer is a pluginlib
+  plugin loaded at runtime — nothing links it — and the tuner is header-only, so
+  exporting the target only adds breakage. We export the headers + their deps and
+  leave the (pre-existing, unconsumed) install `EXPORT` set unexported.
+- **Build-time include via one global `include_directories(include)`** rather than
+  per-target `target_include_directories(... include)`. The package already uses a
+  global `include_directories(${grid_map_core_INC})`; matching that keeps the diff
+  small and covers the layer lib + both nodes + tool + gtests uniformly. The
+  redundant per-target `/src` includes on the three moved-header gtests and the
+  tool were removed; `test_frame_id_resolver` keeps `/src` (that header stays
+  private).
+- **Step-8 verification value:** the throwaway consumer build is what surfaced the
+  `ament_export_targets` bug — the in-package build + 66 passing tests were all
+  green while the export was still unconsumable downstream. Confirms the review's
+  insistence on a real downstream check, not just "the package builds."

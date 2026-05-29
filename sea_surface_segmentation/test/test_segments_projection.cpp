@@ -12,7 +12,7 @@
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2/LinearMath/Quaternion.h"
 
-#include "segments_projection.hpp"
+#include "sea_surface_segmentation/segments_projection.hpp"
 
 using sea_surface_segmentation::is_obstacle_pixel;
 using sea_surface_segmentation::is_waterline_contact_pixel;

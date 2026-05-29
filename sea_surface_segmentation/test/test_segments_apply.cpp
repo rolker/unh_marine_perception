@@ -3,7 +3,7 @@
 #include "nav2_costmap_2d/cost_values.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
 
-#include "segments_apply.hpp"
+#include "sea_surface_segmentation/segments_apply.hpp"
 
 using nav2_costmap_2d::Costmap2D;
 using nav2_costmap_2d::LETHAL_OBSTACLE;

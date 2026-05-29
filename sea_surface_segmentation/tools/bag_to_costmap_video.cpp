@@ -50,8 +50,9 @@
 #include "tf2/time.h"
 #include "tf2_msgs/msg/tf_message.hpp"
 
-#include "occupancy_buffer.hpp"
-#include "segments_projection.hpp"
+#include "sea_surface_segmentation/occupancy_accumulator.hpp"
+#include "sea_surface_segmentation/occupancy_buffer.hpp"
+#include "sea_surface_segmentation/segments_projection.hpp"
 
 namespace
 {
@@ -345,23 +346,16 @@ int main(int argc, char ** argv)
       const cv::Matx33d rot =
         sea_surface_segmentation::rotation_matrix_from_quaternion(cq.x, cq.y, cq.z, cq.w);
 
-      // Moving window: re-centre the buffer on the boat, decay, then ingest.
+      // Moving window + INVERSE (cell→pixel) projection + hit/miss via the shared
+      // per-frame driver — the same accumulate path the offline tuner uses, so the
+      // two produce identical costmaps (rolker/unh_marine_perception#23).
       const double bx = boat_tf.transform.translation.x;
       const double by = boat_tf.transform.translation.y;
-      buffer.move(grid_map::Position(bx, by));
-      buffer.decay(stamp_s);
-
-      // INVERSE (cell→pixel) projection — the corrected path; fills each pixel's footprint.
-      // Tool centres iteration on the boat (visualisation window); the live layer
-      // centres on the camera. Either is valid — the helper iterates a square AABB.
-      for (const auto & o : sea_surface_segmentation::project_observations_inverse(
-          mask, model_it->second, camera_origin, rot, max_range,
-          bx, by, res, half_extent, 0.0))
-      {
-        const grid_map::Position p(o.x, o.y);
-        if (o.obstacle) { buffer.hit(p); } else { buffer.miss(p); }
-        if (!cam_name.empty()) { ++obs_inv_cells[cam_name]; }
-      }
+      const sea_surface_segmentation::AccumulateParams acc_params{
+        max_range, res, half_extent};
+      const std::size_t applied = sea_surface_segmentation::accumulate_frame(
+        buffer, mask, model_it->second, camera_origin, rot, bx, by, stamp_s, acc_params);
+      if (!cam_name.empty()) { obs_inv_cells[cam_name] += static_cast<long>(applied); }
       ++processed;
 
       // Render the mosaic at the requested cadence.

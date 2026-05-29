@@ -19,8 +19,8 @@
 #include "nav2_costmap_2d/layer.hpp"
 #include "nav2_costmap_2d/layered_costmap.hpp"
 
-#include "occupancy_buffer.hpp"
-#include "segments_projection.hpp"
+#include "sea_surface_segmentation/occupancy_buffer.hpp"
+#include "sea_surface_segmentation/segments_projection.hpp"
 
 namespace sea_surface_layer
 {

@@ -1,10 +1,12 @@
 #pragma once
 
-// Private implementation header for the segments_to_pointcloud node.
-// Lives in src/ rather than include/ because the projection helper has
-// no downstream consumers — it's exercised by `src/segments_to_pointcloud.cpp`
-// and by `test/test_segments_projection.cpp`, nothing else. Mirrors the
-// pattern of `frame_id_resolver.hpp` and `segments_apply.hpp`.
+// Exported core header (part of the package's public include/ API). The
+// header-only projection helpers are reused in-package by
+// `src/segments_to_pointcloud.cpp` and `src/sea_surface_layer.cpp`, by the
+// `bag_to_costmap_video` tool via `occupancy_accumulator.hpp`, and out-of-package
+// by offline tools (e.g. the `sea_surface_tuner` in `marine_perception_tools`),
+// so they all compute the costmap with the real code. See
+// rolker/unh_marine_perception#23.
 
 #include <cmath>
 #include <cstddef>
