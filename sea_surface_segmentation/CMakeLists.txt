@@ -25,6 +25,12 @@ find_package(grid_map_core REQUIRED)
 # the path from the imported target and add it globally.
 get_target_property(grid_map_core_INC grid_map_core::grid_map_core INTERFACE_INCLUDE_DIRECTORIES)
 include_directories(${grid_map_core_INC})
+# Exported public headers live in include/sea_surface_segmentation/
+# (occupancy_buffer, segments_projection, segments_apply, occupancy_accumulator).
+# Global build-time include so every target below resolves
+# "sea_surface_segmentation/<hdr>.hpp"; the install + ament_export_* near the end
+# expose the same dir to downstream packages (unh_marine_perception#23).
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(lifecycle_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
@@ -103,7 +109,6 @@ pluginlib_export_plugin_description_file(nav2_costmap_2d costmap_plugins.xml)
 
 install(
   TARGETS sea_surface_layer
-  EXPORT export_sea_surface_layer
   DESTINATION lib
 )
 
@@ -118,7 +123,7 @@ find_package(tf2_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 add_executable(bag_to_costmap_video tools/bag_to_costmap_video.cpp)
-target_include_directories(bag_to_costmap_video PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Core headers come from include/ (global include above); no src/ reach-in needed.
 target_link_libraries(bag_to_costmap_video
   grid_map_core::grid_map_core
   image_geometry::image_geometry
@@ -135,6 +140,18 @@ install(TARGETS bag_to_costmap_video DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+
+# Export the header-only algorithm core for downstream reuse (unh_marine_perception#23).
+install(DIRECTORY include/ DESTINATION include)
+ament_export_include_directories(include)
+# Public deps reachable through the exported HEADER-ONLY cores: grid_map_core
+# (occupancy_buffer), image_geometry + OpenCV (segments_projection /
+# occupancy_accumulator cv::Mat API), nav2_costmap_2d (segments_apply Costmap2D
+# bridge). NB: we deliberately do NOT ament_export_targets the sea_surface_layer
+# library — it's a pluginlib plugin loaded at runtime, nothing links it, and
+# exporting it would force every header-only consumer to resolve the layer's full
+# link closure (cv_bridge/rclcpp/tf2_ros/…). Header consumers only need these deps.
+ament_export_dependencies(grid_map_core image_geometry nav2_costmap_2d OpenCV)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -155,44 +172,43 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
 
-  # segments_apply.hpp is private to the layer (lives next to
-  # sea_surface_layer.cpp in src/); test target reaches into src/
-  # the same way test_frame_id_resolver does. Links against
-  # nav2_costmap_2d_core for Costmap2D.
+  # segments_apply.hpp is an exported core header (include/, on the path via the
+  # global include_directories above). Links nav2_costmap_2d_core for Costmap2D.
   ament_add_gtest(test_segments_apply test/test_segments_apply.cpp)
-  target_include_directories(test_segments_apply PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-  )
   target_link_libraries(test_segments_apply
     nav2_costmap_2d::nav2_costmap_2d_core
   )
 
-  # segments_projection.hpp lives next to segments_to_pointcloud.cpp
-  # in src/ for the same reason; pure-logic helper exercised via this
-  # GTest. Links against image_geometry for PinholeCameraModel and
-  # uses sensor_msgs CameraInfo for the synthetic fixture. tf2 is linked
-  # only to cross-check rotation_matrix_from_quaternion against
-  # tf2::Matrix3x3 (the production conversion this header replaced).
+  # segments_projection.hpp is an exported core header (include/). Pure-logic
+  # helper exercised via this GTest. Links image_geometry for PinholeCameraModel,
+  # uses sensor_msgs CameraInfo for the synthetic fixture. tf2 is linked only to
+  # cross-check rotation_matrix_from_quaternion against tf2::Matrix3x3 (the
+  # production conversion this header replaced).
   find_package(tf2 REQUIRED)
   ament_add_gtest(test_segments_projection test/test_segments_projection.cpp)
-  target_include_directories(test_segments_projection PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-  )
   target_link_libraries(test_segments_projection
     image_geometry::image_geometry
     tf2::tf2
     ${sensor_msgs_TARGETS}
   )
 
-  # occupancy_buffer.hpp is the pure log-odds buffer (grid_map storage +
-  # rolling); private to the layer in src/, exercised via this GTest. Links
+  # occupancy_buffer.hpp is the pure log-odds buffer (grid_map storage + rolling),
+  # an exported core header (include/), exercised via this GTest. Links
   # grid_map_core for GridMap.
   ament_add_gtest(test_occupancy_buffer test/test_occupancy_buffer.cpp)
-  target_include_directories(test_occupancy_buffer PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-  )
   target_link_libraries(test_occupancy_buffer
     grid_map_core::grid_map_core
+  )
+
+  # occupancy_accumulator.hpp drives the per-frame move→decay→project→hit/miss
+  # path shared by the bag→costmap tool and the offline tuner. Links grid_map_core
+  # (buffer) + image_geometry (PinholeCameraModel); uses sensor_msgs CameraInfo for
+  # the synthetic fixture.
+  ament_add_gtest(test_occupancy_accumulator test/test_occupancy_accumulator.cpp)
+  target_link_libraries(test_occupancy_accumulator
+    grid_map_core::grid_map_core
+    image_geometry::image_geometry
+    ${sensor_msgs_TARGETS}
   )
 
   # Plugin smoke test: loads each costmap_2d plugin via pluginlib AND calls

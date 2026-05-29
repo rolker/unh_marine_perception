@@ -22,7 +22,7 @@
 #include <memory>
 #include <string>
 
-#include "segments_projection.hpp"
+#include "sea_surface_segmentation/segments_projection.hpp"
 
 
 class SegmentsToPointCloud : public rclcpp_lifecycle::LifecycleNode

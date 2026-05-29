@@ -18,6 +18,7 @@
   <depend>depthai_marine</depend>
   <depend>grid_map_core</depend>
   <depend>image_geometry</depend>
+  <depend>libopencv-dev</depend>
   <depend>lifecycle_msgs</depend>
   <depend>nav2_costmap_2d</depend>
   <depend>nav_msgs</depend>

@@ -5,7 +5,7 @@
 
 #include <grid_map_core/grid_map_core.hpp>
 
-#include "occupancy_buffer.hpp"
+#include "sea_surface_segmentation/occupancy_buffer.hpp"
 
 using sea_surface_segmentation::OccupancyBuffer;
 using sea_surface_segmentation::OccupancyParams;
