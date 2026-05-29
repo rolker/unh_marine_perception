@@ -200,6 +200,11 @@ TEST(OccupancyBuffer, ValidateRejectsBadParams)
 
   p = OccupancyParams{}; p.free_threshold = std::nan("");  // finite required
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
+
+  // clear_floor must be <= free_threshold, else fully-cleared water floors above
+  // free_threshold and publishes a positive (soft-obstacle) cost.
+  p = OccupancyParams{}; p.free_threshold = -3.0;  // below clear_floor (-2.0)
+  EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 }
 
 // setParams reinterprets accumulated evidence immediately — a single increment

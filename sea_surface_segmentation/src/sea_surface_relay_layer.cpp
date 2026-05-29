@@ -141,10 +141,19 @@ public:
         }
         const int occ = msg->data[static_cast<size_t>(y) * mw + x];
         const int c = sea_surface_segmentation::occupancy_to_cost(occ);
-        if (c >= 0) {
-          master_grid.setCost(
-            static_cast<unsigned int>(i), static_cast<unsigned int>(j),
-            static_cast<unsigned char>(c));
+        if (c < 0) {
+          continue;  // no opinion — leave the master cell untouched
+        }
+        // Combine with MAX (nav2 updateWithMax semantics): only raise a known
+        // cost, write over unknown. A relayed soft cost must never downgrade a
+        // stronger upstream mark — the relay only ADDS, like the producer.
+        const unsigned int mi = static_cast<unsigned int>(i);
+        const unsigned int mj = static_cast<unsigned int>(j);
+        const unsigned char old_cost = master_grid.getCost(mi, mj);
+        if (old_cost == nav2_costmap_2d::NO_INFORMATION ||
+          old_cost < static_cast<unsigned char>(c))
+        {
+          master_grid.setCost(mi, mj, static_cast<unsigned char>(c));
         }
       }
     }

@@ -109,6 +109,29 @@ public:
     declareParameter("max_evidence_step", rclcpp::ParameterValue(max_evidence_step_));
     node->get_parameter(name_ + ".max_evidence_step", max_evidence_step_);
 
+    // Validate the projection knobs at startup (they live on the layer, not in
+    // OccupancyParams, so OccupancyBuffer::validate below doesn't cover them).
+    // Mirror the runtime onParametersSet checks + the min_grazing_angle_deg
+    // clamp-to-default pattern: a bad YAML value must not flow into the logit
+    // math. obstacle_prob_min must be in (0,1) — 0 or 1 makes logit(prior) ±inf
+    // (saturates / disables grading) and NaN silently disables the whole layer;
+    // max_evidence_step must be finite and > 0 (a negative gives std::clamp
+    // lo > hi, which is UB).
+    if (!std::isfinite(obstacle_prob_min_) ||
+      obstacle_prob_min_ <= 0.0 || obstacle_prob_min_ >= 1.0)
+    {
+      RCLCPP_WARN_STREAM(
+        logger_, "Invalid obstacle_prob_min (" << obstacle_prob_min_
+          << "); must be in (0, 1). Using default 0.35.");
+      obstacle_prob_min_ = 0.35;
+    }
+    if (!std::isfinite(max_evidence_step_) || max_evidence_step_ <= 0.0) {
+      RCLCPP_WARN_STREAM(
+        logger_, "Invalid max_evidence_step (" << max_evidence_step_
+          << "); must be finite and > 0. Using default 0.85.");
+      max_evidence_step_ = 0.85;
+    }
+
     std::string why;
     if (!sea_surface_segmentation::OccupancyBuffer::validate(params_, why)) {
       RCLCPP_WARN_STREAM(
@@ -300,10 +323,20 @@ public:
         master_grid.mapToWorld(static_cast<unsigned int>(i), static_cast<unsigned int>(j), wx, wy);
         const int occ = buffer_->occupancyAt(grid_map::Position(wx, wy));
         const int c = sea_surface_segmentation::occupancy_to_cost(occ);
-        if (c >= 0) {
-          master_grid.setCost(
-            static_cast<unsigned int>(i), static_cast<unsigned int>(j),
-            static_cast<unsigned char>(c));
+        if (c < 0) {
+          continue;  // no obstacle opinion — leave the master cell untouched
+        }
+        // Combine with MAX (nav2 updateWithMax semantics): only raise a known
+        // cost, and write over unknown. A graded soft cost (1..252) must never
+        // downgrade another layer's INSCRIBED / LETHAL mark — sea-surface only
+        // ADDS risk.
+        const unsigned int mi = static_cast<unsigned int>(i);
+        const unsigned int mj = static_cast<unsigned int>(j);
+        const unsigned char old_cost = master_grid.getCost(mi, mj);
+        if (old_cost == nav2_costmap_2d::NO_INFORMATION ||
+          old_cost < static_cast<unsigned char>(c))
+        {
+          master_grid.setCost(mi, mj, static_cast<unsigned char>(c));
         }
       }
     }

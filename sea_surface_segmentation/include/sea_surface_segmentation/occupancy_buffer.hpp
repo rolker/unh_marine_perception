@@ -175,6 +175,13 @@ public:
     {
       why = "require free_threshold < lethal_threshold <= obstacle_clamp"; return false;
     }
+    // clear_floor must sit at or below free_threshold, so a maximally-cleared
+    // (floored) water cell reads as "no opinion" (occupancyAt → -1). If
+    // free_threshold were below clear_floor, even fully-cleared water would
+    // floor ABOVE free_threshold and publish a positive (soft-obstacle) cost.
+    if (!(p.clear_floor <= p.free_threshold)) {
+      why = "require clear_floor <= free_threshold"; return false;
+    }
     return true;
   }
 
