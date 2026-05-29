@@ -53,3 +53,8 @@ layer and relay; all params runtime-reconfigurable. Reflex/CA path untouched. Ne
 - [ ] (suggestion) cost ramp is coarse at the low end (occ=1→1, 2→4) — monotonic, below INSCRIBED; no action _(Claude)_
 
 Static analysis: cpplint flags are pre-existing house style (passes repo pre-commit). Cross-model adversarial agreed on the init-validation gap; Copilot uniquely caught the cost-downgrade regression.
+
+### Copilot PR review (post-ready) — addressed
+- [x] (defensive) `pixel_log_odds` could UB/NaN on bad params in the exported header (shared with #23 tuner) — guard params, clamp R — `segments_projection.hpp:34`
+- [x] (defensive) `accumulate()` would store a NaN increment (drops evidence) — treat non-finite as no-op — `occupancy_buffer.hpp:66`
+- Both hardened + unit-tested (71 tests). Corrected the plan's "routing inert until config" note: verified `SmacPlannerHybrid.cost_penalty: 10.0` is already set in `seafloor_echoboat_project11` — routing honors the gradient today; controller (`CrabbingPathFollower`) ignores cost. Follow-up is tuning `cost_penalty`/`inflation_radius`, not enabling.

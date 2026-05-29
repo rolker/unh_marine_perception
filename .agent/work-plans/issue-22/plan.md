@@ -99,10 +99,17 @@ predicates — the reflex Collision-Monitor path is known-good and out of scope.
 
 ## Open Questions
 
-- **Planner cost weighting (separate repo)** — the graded ramp only biases routing
-  if `SmacPlannerHybrid.cost_penalty` / MPPI `CostCritic` are tuned in the
-  echoboats/seafloor nav2 config. Until then the gradient is visible (rviz) and the
-  controller may honor it, but global routing won't. Follow-up config task.
+- **Planner cost weighting (already wired — tune, don't enable)** — verified
+  against `seafloor_echoboat_project11/.../nav2_params.base.yaml`: the global
+  `SmacPlannerHybrid` already has `cost_penalty: 10.0`, so the relayed graded
+  gradient **does** bias global routing today (no config change needed to
+  activate). The controller is `CrabbingPathFollower` (PID path tracker) which
+  ignores costmap cost entirely — so avoidance is planner-side + the reflex
+  Collision Monitor, not the controller. Real follow-up is *tuning*: (1)
+  `cost_penalty: 10` is aggressive and may deflect routes around low-confidence
+  soft cells; (2) `inflation_radius: 150` m means every now-lethal cell (incl.
+  newly-marking weak buoys) creates a 150 m standoff bubble — validate routing
+  isn't over-conservative in a buoy field.
 - **On-water tuning** — defaults (`obstacle_prob_min=0.35`, `max_evidence_step=0.85`,
   `clear_floor=−2`, `free_threshold=0`, `lethal_threshold=1`) are provisional; all
   are runtime-reconfigurable. Tune `obstacle_prob_min` first (dim-buoy sensitivity)
@@ -112,8 +119,9 @@ predicates — the reflex Collision-Monitor path is known-good and out of scope.
 
 ## Estimated Scope
 
-Single PR (#25), implemented. Follow-up: planner-side cost-weight config in the
-echoboats/seafloor nav2 repo to activate soft-cost routing.
+Single PR (#25), implemented. Follow-up: on-water tuning of `cost_penalty` /
+`inflation_radius` vs. the new gradient in the echoboats/seafloor nav2 config
+(tuning, not enabling — routing already honors costs).
 
 ## Implementation Notes
 
