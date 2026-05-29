@@ -16,6 +16,7 @@ using sea_surface_segmentation::accumulate_frame;
 using sea_surface_segmentation::AccumulateParams;
 using sea_surface_segmentation::OccupancyBuffer;
 using sea_surface_segmentation::OccupancyParams;
+using sea_surface_segmentation::pixel_log_odds;
 using sea_surface_segmentation::project_observations_inverse;
 
 namespace
@@ -91,6 +92,12 @@ AccumulateParams acc_params()
   return AccumulateParams{/*max_range=*/100.0, kRes, kHalfExtent};
 }
 
+// The graded log-odds increment a single R=200 waterline-contact pixel
+// contributes under the AccumulateParams defaults (obstacle_prob_min=0.35,
+// max_evidence_step=0.85). All accumulator tests below assert against this rather
+// than the removed flat `hit_log_odds`.
+const double kContact = pixel_log_odds(200, 0.35, 0.85);
+
 }  // namespace
 
 // A single all-water frame applies a miss to every observed water cell and
@@ -114,8 +121,11 @@ TEST(AccumulateFrame, AllWaterAppliesMissesAndReturnsObservationCount)
 
   EXPECT_GT(applied, 0u) << "in-footprint water cells should be observed";
   EXPECT_EQ(applied, direct.size()) << "driver must apply exactly the projected observations";
-  // The centre pixel (8,6) covers world (0,0); under all-water it is a miss.
-  EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), params.miss_log_odds, kLogOddsTol);
+  // The centre pixel (8,6) covers world (0,0); under all-water (R=0) it is a
+  // negative (water) graded increment.
+  const double kWater = pixel_log_odds(0, p.obstacle_prob_min, p.max_evidence_step);
+  EXPECT_LT(kWater, 0.0) << "water pixel must yield negative evidence";
+  EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), kWater, kLogOddsTol);
 }
 
 // A single obstacle contact pixel at image centre marks the world-(0,0) cell as
@@ -132,9 +142,10 @@ TEST(AccumulateFrame, ContactPixelMarksHitCell)
     buffer, mask, model, kNadirOrigin, nadir_rotation(),
     0.0, 0.0, 100.0, acc_params());
 
-  // (0,0) ← pixel (8,6) = the contact → one hit.
-  EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), params.hit_log_odds, kLogOddsTol);
-  // A neighbour cell (0.25,0) ← a water pixel → miss (negative).
+  // (0,0) ← pixel (8,6) = the contact → one graded hit (R=200).
+  EXPECT_GT(kContact, 0.0) << "a contact pixel must yield positive evidence";
+  EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), kContact, kLogOddsTol);
+  // A neighbour cell (0.25,0) ← a water pixel → negative evidence.
   EXPECT_LT(buffer.logOdds(grid_map::Position(0.25, 0.0)), 0.0);
 }
 
@@ -152,7 +163,7 @@ TEST(AccumulateFrame, MovePreservesOverlappingEvidence)
   contact.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);
   accumulate_frame(buffer, contact, model, kNadirOrigin, nadir_rotation(),
     /*boat_x=*/0.0, /*boat_y=*/0.0, /*stamp_s=*/100.0, acc_params());
-  ASSERT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), params.hit_log_odds, kLogOddsTol);
+  ASSERT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), kContact, kLogOddsTol);
 
   // Shift the window by 0.5 m (2 cells, parity preserved so (0,0) stays a cell
   // centre); (0,0) stays inside the 4.25 m window. Sky mask → zero observations,
@@ -162,7 +173,7 @@ TEST(AccumulateFrame, MovePreservesOverlappingEvidence)
     /*boat_x=*/0.5, /*boat_y=*/0.0, /*stamp_s=*/100.0, acc_params());
 
   EXPECT_EQ(applied, 0u) << "sky frame contributes no observations";
-  EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), params.hit_log_odds, kLogOddsTol)
+  EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), kContact, kLogOddsTol)
     << "move() must preserve the prior hit at its world position";
 }
 
@@ -182,14 +193,14 @@ TEST(AccumulateFrame, DecayAttenuatesPriorHitBetweenFrames)
   contact.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);
   accumulate_frame(buffer, contact, model, kNadirOrigin, nadir_rotation(),
     0.0, 0.0, /*stamp_s=*/100.0, acc_params());
-  ASSERT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), params.hit_log_odds, kLogOddsTol);
+  ASSERT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), kContact, kLogOddsTol);
 
   // One half-life later, with no new observation at (0,0): value halves.
   accumulate_frame(buffer, all_sky(), model, kNadirOrigin, nadir_rotation(),
     0.0, 0.0, /*stamp_s=*/110.0, acc_params());
 
   EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)),
-    params.hit_log_odds * 0.5, 1e-3)
+    kContact * 0.5, 1e-3)
     << "decay() must attenuate prior evidence by the half-life factor before ingest";
 }
 
@@ -212,13 +223,13 @@ TEST(AccumulateFrame, DecayPrecedesFreshIngest)
   contact.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);
   accumulate_frame(buffer, contact, model, kNadirOrigin, nadir_rotation(),
     0.0, 0.0, /*stamp_s=*/100.0, acc_params());
-  ASSERT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), params.hit_log_odds, kLogOddsTol);
+  ASSERT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)), kContact, kLogOddsTol);
 
   // Same contact, one half-life later: decay the prior hit, THEN add the fresh one.
   accumulate_frame(buffer, contact, model, kNadirOrigin, nadir_rotation(),
     0.0, 0.0, /*stamp_s=*/110.0, acc_params());
 
   EXPECT_NEAR(buffer.logOdds(grid_map::Position(0.0, 0.0)),
-    params.hit_log_odds * 0.5 + params.hit_log_odds, 1e-3)
+    kContact * 0.5 + kContact, 1e-3)
     << "fresh hit must be applied after decay, not decayed with the prior evidence";
 }

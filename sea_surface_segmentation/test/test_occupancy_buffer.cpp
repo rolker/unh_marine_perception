@@ -5,8 +5,10 @@
 
 #include <grid_map_core/grid_map_core.hpp>
 
+#include "sea_surface_segmentation/cost_mapping.hpp"
 #include "sea_surface_segmentation/occupancy_buffer.hpp"
 
+using sea_surface_segmentation::occupancy_to_cost;
 using sea_surface_segmentation::OccupancyBuffer;
 using sea_surface_segmentation::OccupancyParams;
 
@@ -21,49 +23,76 @@ OccupancyBuffer make_buffer(const OccupancyParams & p = OccupancyParams{})
 const grid_map::Position kP(0.3, 0.0);  // a representative observed cell
 }  // namespace
 
-// A single obstacle observation must NOT mark a cell lethal — this is the
-// flicker rejection that the per-frame-reset layer lacked (one stray
-// segmentation pixel shouldn't become an obstacle).
+// A single small positive increment must NOT mark a cell lethal — flicker
+// rejection: one marginal observation shouldn't read as a confirmed obstacle.
 TEST(OccupancyBuffer, SingleObservationBelowThreshold)
 {
-  auto buf = make_buffer();  // hit=0.85, threshold=1.0
-  EXPECT_TRUE(buf.hit(kP));
+  auto buf = make_buffer();  // lethal_threshold = 1.0
+  EXPECT_TRUE(buf.accumulate(kP, 0.85));
   EXPECT_NEAR(buf.logOdds(kP), 0.85, 1e-5);
   EXPECT_FALSE(buf.isLethal(kP)) << "one observation < threshold must not be lethal";
 }
 
-// Repeated observations accumulate past the threshold — the obstacle is
+// Repeated positive increments accumulate past the threshold — the obstacle is
 // remembered once it's confirmed.
 TEST(OccupancyBuffer, RepeatedObservationsCrossThreshold)
 {
   auto buf = make_buffer();
-  buf.hit(kP);
-  buf.hit(kP);
+  buf.accumulate(kP, 0.85);
+  buf.accumulate(kP, 0.85);
   EXPECT_NEAR(buf.logOdds(kP), 1.70, 1e-5);
   EXPECT_TRUE(buf.isLethal(kP));
 }
 
-// Free-space (water) observations drive an obstacle back below the threshold —
-// the layer can clear a stale mark when it sees water there.
+// Negative (water) increments drive an obstacle back below the threshold — the
+// layer can clear a stale mark when it sees water there.
 TEST(OccupancyBuffer, FreeObservationsClearObstacle)
 {
   auto buf = make_buffer();
-  buf.hit(kP); buf.hit(kP); buf.hit(kP);  // 2.55 → lethal
+  buf.accumulate(kP, 0.85); buf.accumulate(kP, 0.85); buf.accumulate(kP, 0.85);  // 2.55 → lethal
   ASSERT_TRUE(buf.isLethal(kP));
-  buf.miss(kP); buf.miss(kP); buf.miss(kP); buf.miss(kP);  // -1.6 → 0.95
+  buf.accumulate(kP, -0.40); buf.accumulate(kP, -0.40);
+  buf.accumulate(kP, -0.40); buf.accumulate(kP, -0.40);  // -1.6 → 0.95
   EXPECT_NEAR(buf.logOdds(kP), 0.95, 1e-5);
   EXPECT_FALSE(buf.isLethal(kP));
 }
 
-// Evidence is bounded so it stays revisable (no runaway saturation that would
-// take forever to clear).
+// Evidence is bounded to [clear_floor, obstacle_clamp] so it stays revisable
+// (no runaway saturation that would take forever to clear).
 TEST(OccupancyBuffer, ClampBoundsEvidence)
 {
-  auto buf = make_buffer();  // clamp = 5.0
-  for (int i = 0; i < 20; ++i) { buf.hit(kP); }
-  EXPECT_NEAR(buf.logOdds(kP), 5.0, 1e-5);
-  for (int i = 0; i < 40; ++i) { buf.miss(kP); }
-  EXPECT_NEAR(buf.logOdds(kP), -5.0, 1e-5);
+  auto buf = make_buffer();  // obstacle_clamp = 5.0, clear_floor = -2.0
+  for (int i = 0; i < 50; ++i) { buf.accumulate(kP, 100.0); }  // huge +increments
+  EXPECT_NEAR(buf.logOdds(kP), 5.0, 1e-5) << "saturates at obstacle_clamp";
+  for (int i = 0; i < 50; ++i) { buf.accumulate(kP, -100.0); }  // huge -increments
+  EXPECT_NEAR(buf.logOdds(kP), -2.0, 1e-5) << "saturates at clear_floor";
+}
+
+// occupancyAt: unobserved is -1; small positive between free and lethal ramps
+// 1..99; at/above lethal is 100; at/below free_threshold (e.g. negative) is -1.
+TEST(OccupancyBuffer, OccupancyAtRampAndBounds)
+{
+  auto buf = make_buffer();  // free_threshold=0, lethal_threshold=1.0
+
+  // Unobserved → -1.
+  EXPECT_EQ(buf.occupancyAt(kP), -1);
+
+  // Half-way up the ramp (0.5 of [0,1]) → ~50.
+  buf.accumulate(kP, 0.5);
+  const int mid = buf.occupancyAt(kP);
+  EXPECT_GE(mid, 1);
+  EXPECT_LE(mid, 99);
+  EXPECT_NEAR(mid, 50, 2) << "linear ramp should land near the midpoint";
+
+  // Push to/over lethal → 100.
+  buf.accumulate(kP, 1.0);  // total 1.5 >= 1.0
+  EXPECT_EQ(buf.occupancyAt(kP), 100);
+
+  // A purely negative (water) cell sits at/below free_threshold → -1.
+  const grid_map::Position kWater(0.3, 0.5);
+  buf.accumulate(kWater, -0.4);
+  EXPECT_EQ(buf.occupancyAt(kWater), -1)
+    << "<= free_threshold reads as no opinion (we only ADD cost)";
 }
 
 // A never-observed cell is unknown (NaN), not free and not lethal.
@@ -72,6 +101,7 @@ TEST(OccupancyBuffer, UnobservedCellIsUnknown)
   auto buf = make_buffer();
   EXPECT_TRUE(std::isnan(buf.logOdds(kP)));
   EXPECT_FALSE(buf.isLethal(kP));
+  EXPECT_EQ(buf.occupancyAt(kP), -1);
 }
 
 // "Remember, but not forever": a confirmed obstacle decays back below the
@@ -79,7 +109,7 @@ TEST(OccupancyBuffer, UnobservedCellIsUnknown)
 TEST(OccupancyBuffer, DecayForgetsObstacleOverTime)
 {
   auto buf = make_buffer();  // half-life 30 s
-  buf.hit(kP); buf.hit(kP);  // 1.70 → lethal
+  buf.accumulate(kP, 0.85); buf.accumulate(kP, 0.85);  // 1.70 → lethal
   buf.decay(0.0);            // first call only seeds the clock
   EXPECT_TRUE(buf.isLethal(kP)) << "no time elapsed yet";
   buf.decay(25.0);           // 1.70 * 0.5^(25/30) ≈ 0.954
@@ -95,7 +125,7 @@ TEST(OccupancyBuffer, DecayForgetsObstacleOverTime)
 TEST(OccupancyBuffer, BackwardTimeDoesNotDecayOrRewind)
 {
   auto buf = make_buffer();  // half-life 30 s
-  buf.hit(kP); buf.hit(kP);  // 1.70 → lethal
+  buf.accumulate(kP, 0.85); buf.accumulate(kP, 0.85);  // 1.70 → lethal
   buf.decay(100.0);          // seed reference at t=100
   buf.decay(50.0);           // backward: must not decay, must not rewind reference
   EXPECT_NEAR(buf.logOdds(kP), 1.70, 1e-5) << "backward time must not decay";
@@ -107,18 +137,13 @@ TEST(OccupancyBuffer, BackwardTimeDoesNotDecayOrRewind)
 
 // Rolling the window through a sequence of origin shifts must preserve
 // accumulated evidence at its true world cell (not drift it to a neighbour or
-// wipe it), and newly-exposed cells must read as unobserved. grid_map's move()
-// snaps each shift to whole cells and carries the sub-cell residual internally,
-// so this exercises no-drift-across-rolling + exposed-unobserved — the core of
-// review-plan must-fix #1 — rather than the residual arithmetic itself.
+// wipe it), and newly-exposed cells must read as unobserved.
 TEST(OccupancyBuffer, RollingPreservesEvidenceAtWorldCell)
 {
   auto buf = make_buffer();
-  buf.hit(kP); buf.hit(kP);  // lethal at world (0.3, 0)
+  buf.accumulate(kP, 0.85); buf.accumulate(kP, 0.85);  // lethal at world (0.3, 0)
   ASSERT_TRUE(buf.isLethal(kP));
 
-  // Roll the window through successive origin steps to an end center of
-  // (1.0, 0). kP stays inside the window throughout.
   buf.move(grid_map::Position(0.3, 0.0));
   buf.move(grid_map::Position(0.6, 0.0));
   buf.move(grid_map::Position(1.0, 0.0));
@@ -126,8 +151,6 @@ TEST(OccupancyBuffer, RollingPreservesEvidenceAtWorldCell)
   EXPECT_TRUE(buf.isLethal(kP))
     << "evidence must survive fractional rolling at its world location";
 
-  // A cell that was outside the original window (|x|<=2) but inside the rolled
-  // one (x in [-1,3]) must be unobserved, not lethal.
   const grid_map::Position exposed(2.5, 0.0);
   EXPECT_TRUE(std::isnan(buf.logOdds(exposed)));
   EXPECT_FALSE(buf.isLethal(exposed));
@@ -138,8 +161,9 @@ TEST(OccupancyBuffer, OutOfBoundsObservationIsNoOp)
 {
   auto buf = make_buffer();
   const grid_map::Position outside(100.0, 100.0);
-  EXPECT_FALSE(buf.hit(outside));
+  EXPECT_FALSE(buf.accumulate(outside, 0.85));
   EXPECT_FALSE(buf.isLethal(outside));
+  EXPECT_EQ(buf.occupancyAt(outside), -1);
 }
 
 // Parameter validation rejects values that would corrupt the buffer's meaning —
@@ -150,37 +174,41 @@ TEST(OccupancyBuffer, ValidateRejectsBadParams)
   EXPECT_TRUE(OccupancyBuffer::validate(OccupancyParams{}, why)) << why;
 
   OccupancyParams p;
-  p.hit_log_odds = -1.0;  // must be > 0
+  p.obstacle_clamp = -1.0;  // must be > 0
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 
-  p = OccupancyParams{}; p.miss_log_odds = 0.5;  // must be < 0
+  p = OccupancyParams{}; p.clear_floor = 0.5;  // must be < 0
+  EXPECT_FALSE(OccupancyBuffer::validate(p, why));
+
+  p = OccupancyParams{}; p.clear_floor = 0.0;  // must be strictly < 0
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 
   p = OccupancyParams{}; p.decay_half_life_s = 0.0;  // must be > 0
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 
-  p = OccupancyParams{}; p.lethal_threshold = 99.0;  // must be <= clamp
+  p = OccupancyParams{}; p.lethal_threshold = 99.0;  // must be <= obstacle_clamp
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 
-  p = OccupancyParams{}; p.lethal_threshold = 0.0;   // must be > 0 (else 1 hit = lethal)
+  p = OccupancyParams{}; p.free_threshold = 1.0; p.lethal_threshold = 1.0;  // free < lethal
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 
-  p = OccupancyParams{}; p.lethal_threshold = -1.0;  // negative inverts safety (water => lethal)
+  p = OccupancyParams{}; p.free_threshold = 2.0;  // free >= lethal (1.0)
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 
-  p = OccupancyParams{}; p.hit_log_odds = std::nan("");  // finite required
+  p = OccupancyParams{}; p.obstacle_clamp = std::nan("");  // finite required
+  EXPECT_FALSE(OccupancyBuffer::validate(p, why));
+
+  p = OccupancyParams{}; p.free_threshold = std::nan("");  // finite required
   EXPECT_FALSE(OccupancyBuffer::validate(p, why));
 }
 
-// setParams reinterprets accumulated evidence immediately — a single hit that
-// sat just under the default lethal_threshold (1.0) becomes lethal once a
+// setParams reinterprets accumulated evidence immediately — a single increment
+// that sat just under the default lethal_threshold (1.0) becomes lethal once a
 // lower threshold (0.3) is applied at runtime, without re-observing the cell.
-// This is the live-tunable contract the layer's param callback relies on
-// (`SeaSurfaceLayer::onParametersSet` → `OccupancyBuffer::setParams`).
 TEST(OccupancyBuffer, SetParamsReinterpretsAccumulatedEvidence)
 {
-  auto buf = make_buffer();  // defaults: hit=0.85, threshold=1.0
-  EXPECT_TRUE(buf.hit(kP));
+  auto buf = make_buffer();  // defaults: lethal_threshold = 1.0
+  EXPECT_TRUE(buf.accumulate(kP, 0.85));
   EXPECT_FALSE(buf.isLethal(kP)) << "0.85 < 1.0, not yet lethal at default threshold";
 
   OccupancyParams looser = OccupancyParams{};
@@ -191,4 +219,23 @@ TEST(OccupancyBuffer, SetParamsReinterpretsAccumulatedEvidence)
 
   EXPECT_TRUE(buf.isLethal(kP))
     << "lowered threshold must reinterpret accumulated 0.85 log-odds as lethal";
+}
+
+// occupancy_to_cost boundaries: -1/0 → -1 (untouched); 1 → 1; 99 → 252 (below
+// INSCRIBED 253); 100 → LETHAL_OBSTACLE (254).
+TEST(CostMapping, OccupancyToCostBoundaries)
+{
+  EXPECT_EQ(occupancy_to_cost(-1), -1);
+  EXPECT_EQ(occupancy_to_cost(0), -1);
+  EXPECT_EQ(occupancy_to_cost(1), 1);
+  EXPECT_EQ(occupancy_to_cost(99), 252);
+  EXPECT_EQ(occupancy_to_cost(100), 254);  // LETHAL_OBSTACLE
+  // Monotonic across the soft ramp, and never reaching INSCRIBED (253).
+  int prev = 0;
+  for (int occ = 1; occ <= 99; ++occ) {
+    const int c = occupancy_to_cost(occ);
+    EXPECT_GE(c, prev);
+    EXPECT_LE(c, 252) << "soft cost must stay below INSCRIBED_INFLATED_OBSTACLE (253)";
+    prev = c;
+  }
 }

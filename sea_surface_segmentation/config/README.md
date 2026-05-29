@@ -90,9 +90,12 @@ IncludeLaunchDescription(
 
 A `nav2_costmap_2d::Layer` plugin that fuses one or more camera
 segmentation streams into a single persistent, decaying log-odds
-occupancy buffer in the costmap's global frame, and stamps cells whose
-accumulated evidence has crossed the lethal threshold into the master
-costmap. Replaces the pre-#19 per-camera layer instances (each with a
+occupancy buffer in the costmap's global frame, and stamps a graded cost
+into the master costmap: `LETHAL_OBSTACLE` at the lethal threshold and a
+soft cost ramp below it (per-cell occupancy `1..99` → cost `1..252`, kept
+below the inscribed cost so a graded cell never reads as an inscribed
+collision). Cells with no obstacle opinion are left untouched (the layer
+only ADDS). Replaces the pre-#19 per-camera layer instances (each with a
 private buffer wiped every frame), giving cross-camera fusion and
 short-term obstacle memory through FOV handoffs.
 
@@ -142,11 +145,13 @@ fewer flicker losses) and persists across FOV handoffs.
 | `maximum_range` | double | `100.0` | **yes** | Projection AABB half-extent per camera (m). |
 | `min_grazing_angle_deg` | double | `0.0` | **yes** | Reject rays that hit the water plane at less than this angle from horizontal. `0` = filter off. Bounds horizontal reach to ≈ `camera_height / tan(angle)`; cuts long-range noise where small pitch uncertainty produces large ground error. |
 | `published_topic` | string | `""` | no | When non-empty, republishes the lethal mask on this topic for `SeaSurfaceRelayLayer`. Empty = disabled. |
-| `hit_log_odds` | double | `0.85` | **yes** | Log-odds added on a waterline-contact observation. |
-| `miss_log_odds` | double | `-0.40` | **yes** | Log-odds added on a water (free-space) observation; negative. |
-| `clamp` | double | `5.0` | **yes** | Symmetric log-odds bound — keeps evidence revisable, prevents saturation. |
-| `lethal_threshold` | double | `1.0` | **yes** | Log-odds at or above which a cell stamps `LETHAL_OBSTACLE`. Must be in `(0, clamp]`. |
+| `obstacle_clamp` | double | `5.0` | **yes** | Upper log-odds bound — keeps obstacle evidence revisable, prevents saturation. |
+| `clear_floor` | double | `-2.0` | **yes** | Lower (negative) log-odds bound for accumulated water/free evidence. Must be `< 0`. |
+| `free_threshold` | double | `0.0` | **yes** | At or below this log-odds a cell has no obstacle opinion (occupancy `-1`; we only ADD cost). |
+| `lethal_threshold` | double | `1.0` | **yes** | Log-odds at or above which a cell reads as fully lethal (occupancy `100` → `LETHAL_OBSTACLE`). Require `free_threshold < lethal_threshold <= obstacle_clamp`. |
 | `decay_half_life_s` | double | `30.0` | **yes** | Unobserved evidence halves every this many wall-clock seconds. |
+| `obstacle_prob_min` | double | `0.35` | **yes** | Graded obstacle gate / decision prior. A pixel counts as obstacle-ish when `P(obstacle) >= obstacle_prob_min`, and the per-pixel logit's zero-crossing sits here (not 0.5) so marginal-but-positive evidence still contributes. Must be in `(0, 1)`. |
+| `max_evidence_step` | double | `0.85` | **yes** | Per-observation log-odds cap (flicker rejection); bounds any single frame's contribution. Must be `> 0`. |
 
 **Live-tunable**: change via `ros2 param set <costmap_node>
 <layer_name>.<param> <value>`. The validating
@@ -163,8 +168,11 @@ to apply" message so the operator isn't silently misled.
 - The layer projects pixel→world via the cell→pixel inverse direction
   (`project_observations_inverse` in `segments_projection.hpp`): iterate
   the world cells the camera can reach, classify each by the pixel it
-  covers. Waterline contact → hit (evidence ↑); water → miss
-  (evidence ↓); occluded body / sky pixels → skipped (no update). Only
+  covers. Each contributing pixel adds a **graded** log-odds increment:
+  a prior-shifted, `max_evidence_step`-capped logit of the red channel
+  (`255·P(obstacle)`), with the zero-crossing at `obstacle_prob_min`.
+  Waterline contact → positive evidence; water → negative; occluded
+  body / sky pixels → skipped (no update). Only
   the waterline contact gets back-projected onto the water plane (z=0);
   above-water body pixels would project past the real obstacle as a
   false "shadow" of lethal cells out to maximum_range.
@@ -179,13 +187,16 @@ to apply" message so the operator isn't silently misled.
 ## `sea_surface_layer::SeaSurfaceRelayLayer` (costmap_2d plugin)
 
 A thin counterpart to `SeaSurfaceLayer` for the case where the same
-lethal cells should reach a second costmap (typically the global
+graded costs should reach a second costmap (typically the global
 costmap, so `SmacPlannerHybrid` plans around buoys). The relay
 subscribes to a `nav_msgs::msg::OccupancyGrid` published by a peer
 `SeaSurfaceLayer` (running in another costmap, with `published_topic`
-set), and stamps `LETHAL_OBSTACLE` into its own master grid where the
-published cell is at or above `100`. The segmentation projection runs
-only once — in the producer.
+set), and stamps the **full graded gradient** into its own master grid:
+each published occupancy maps through the same `occupancy_to_cost`
+ramp as the producer (`1..99` → soft cost `1..252`, `100` →
+`LETHAL_OBSTACLE`); no-opinion cells (`-1`, or any occupancy `<= 0`)
+are left untouched. The segmentation projection runs only once — in
+the producer.
 
 ### Configuration
 
@@ -205,11 +216,12 @@ global_costmap:
 
 ### Behavior notes
 
-- Only cells published as `100` (lethal) stamp into the master; `-1`
-  ("no opinion") cells leave the master untouched, so the relay never
-  inadvertently clears another layer's marks (the global costmap's
-  chart + inflation contributions stay authoritative; sea-surface only
-  ADDS).
+- The full graded gradient is relayed: soft costs (`1..252`) plus
+  `LETHAL_OBSTACLE`, mapped from the published occupancy via
+  `occupancy_to_cost`. Cells with occupancy `<= 0` / `-1` ("no opinion")
+  leave the master untouched, so the relay never inadvertently clears
+  another layer's marks (the global costmap's chart + inflation
+  contributions stay authoritative; sea-surface only ADDS).
 - Cell-lookup is by world position, so the producer's costmap and the
   consumer's can have different pose / resolution / dimensions and the
   lethal cells still land at the correct world location.

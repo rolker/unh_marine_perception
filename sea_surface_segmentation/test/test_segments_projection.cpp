@@ -535,6 +535,10 @@ TEST(ProjectObservationsInverse, AllWaterAllMisses)
   auto [obstacle, free] = count_obs(obs);
   EXPECT_EQ(obstacle, 0);
   EXPECT_GT(free, 0) << "every in-footprint cell should be classified as water-miss";
+  // Graded evidence: every water observation carries a negative log-odds.
+  for (const auto & o : obs) {
+    EXPECT_LT(o.log_odds, 0.0) << "water (R=0) must yield negative graded evidence";
+  }
 }
 
 // All-sky mask → every cell projects to a sky pixel → SKIP (no obs), not miss.
@@ -567,6 +571,14 @@ TEST(ProjectObservationsInverse, ContactCellHitsBodyCellsSkipped)
   // obstacle there. Verify by ensuring obstacle count is bounded — the contact
   // is one pixel, so only cells projecting to that one pixel become hits.
   EXPECT_LE(obstacle, 4) << "only the contact-pixel's cell footprint is hit, not the body's";
+  // Graded evidence sign: obstacle observations are positive, water negative.
+  for (const auto & o : obs) {
+    if (o.obstacle) {
+      EXPECT_GT(o.log_odds, 0.0) << "contact (R=200) must yield positive graded evidence";
+    } else {
+      EXPECT_LT(o.log_odds, 0.0) << "water (R=0) must yield negative graded evidence";
+    }
+  }
 }
 
 // Cells beyond max_range (even when in-image) are dropped by the Euclidean
