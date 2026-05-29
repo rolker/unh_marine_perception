@@ -473,6 +473,49 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
       // else: sky (blue-dominant) or ambiguous → skip (no observation)
     }
   }
+
+  // Per-column contact backstop: the cell loop above only marks cells whose
+  // (rounded) projection lands exactly on contact_row[u]. At close range the
+  // angular resolution dwarfs the cell-grid step — few or zero cells round to
+  // the exact contact pixel, so a clearly-detected close buoy can produce no
+  // marks at all. This pass back-projects each detected contact pixel directly
+  // to z = plane_z and pushes one observation at the contact's true world
+  // position. The mark lands AT the obstacle's footprint (not the body
+  // back-projected past it), so no radial false shadow is introduced. Same
+  // range / grazing gates as the cell loop.
+  const double cam_z = camera_origin[2];
+  for (int col = 0; col < mask_rgb8.cols; ++col) {
+    const int crow = contact_row[col];
+    if (crow < 0) { continue; }
+
+    const cv::Point2d cpixel(col, crow);
+    const cv::Point3d ray_cam = camera_model.projectPixelTo3dRay(cpixel);
+    const cv::Vec3d ray_target =
+      rotation_cam_to_target * cv::Vec3d(ray_cam.x, ray_cam.y, ray_cam.z);
+    if (!std::isfinite(ray_target[2]) || ray_target[2] == 0.0) { continue; }
+    const double u_param = (plane_z - cam_z) / ray_target[2];
+    if (!std::isfinite(u_param) || u_param <= 0.0) { continue; }
+
+    const double wxc = camera_origin[0] + u_param * ray_target[0];
+    const double wyc = camera_origin[1] + u_param * ray_target[1];
+    if (!std::isfinite(wxc) || !std::isfinite(wyc)) { continue; }
+
+    const double dx = wxc - camera_origin[0];
+    const double dy = wyc - camera_origin[1];
+    const double range_sq_xy = dx * dx + dy * dy;
+    if (range_sq_xy > max_range * max_range) { continue; }
+    if (min_grazing_sin > 0.0) {
+      const double dz = plane_z - cam_z;
+      const double range_sq_full = range_sq_xy + dz * dz;
+      if (dz * dz < min_grazing_sin_sq * range_sq_full) { continue; }
+    }
+
+    const cv::Vec3b cpx = mask_rgb8.at<cv::Vec3b>(crow, col);
+    observations.push_back(
+      {wxc, wyc, true,
+       pixel_log_odds(cpx[0], obstacle_prob_min, max_evidence_step)});
+  }
+
   return observations;
 }
 
