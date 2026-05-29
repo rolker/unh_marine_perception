@@ -15,60 +15,71 @@ into the log-odds buffer. Marginal-red obstacles are scored as confident water a
 symmetric ±5 clamp over-damps recovery once a cell has saturated to water.
 
 Fix: stop collapsing the softmax. Feed the buffer the real per-pixel occupancy
-log-odds `Δ = clamp(log(R/(255−R)))`, bound recovery with an asymmetric clamp, and
-(phase 2) emit a graded cost ramp instead of binary lethal.
+log-odds (prior-shifted at `obstacle_prob_min`; see Implementation Notes), bound
+recovery with an asymmetric clamp, and emit a graded cost ramp instead of binary
+lethal. Single PR; all knobs runtime-tunable.
 
-## Approach
+## Approach (single PR — implemented)
 
-**Phase 1 — graded evidence + bounded recovery (safety/correctness, PR1)**
+Per the 2026-05-29 discussion: **one PR**, **graded cost output** (not binary),
+**all knobs runtime-tunable** for on-water tuning, and the **reflex/Collision-Monitor
+path left untouched** (it is known-good; the #186 bug is costmap-only).
 
-1. **`OccupancyObservation` carries evidence** — add a `double log_odds` field
-   (keep `bool obstacle` for back-compat with the #23 offline core). Additive only.
-2. **Compute per-pixel log-odds** in `project_observations_inverse` (and forward
-   `project_observations`): for the waterline-contact and water cells, set
-   `log_odds = clamp(log((R+ε)/(255−R+ε)))` with ε guarding `R∈{0,255}` → ±∞.
-   Drop the argmax-only classification as the vote source.
-3. **Buffer applies the increment** — `OccupancyBuffer::apply(pos, obs.log_odds)`
-   instead of fixed hit/miss; `sea_surface_layer.cpp:408–414` passes it through.
-4. **Asymmetric clamp** — split `clamp` into `obstacle_ceiling` (+5) and
-   `clear_floor` (−2) in `OccupancyParams` + `validate()`; recovery cleared→lethal
-   drops ~8→~4 frames.
-5. **Reflex-gate consistency** — `segments_to_pointcloud` (reflex feed) thresholds
-   `P(obs) = R/255 > τ` instead of strict argmax, so faint obstacles reach the live
-   Collision Monitor too.
-6. **Tests** — `test_occupancy_buffer` (asymmetric clamp, increment apply, tail
-   clamp); `test_segments_projection` (log-odds at known RGB, ε guard, water
-   negative).
+1. **Graded per-observation evidence** — `OccupancyObservation` gains a signed
+   `double log_odds` (additive; keeps `obstacle` for the #23 shared API). A new
+   `pixel_log_odds(R, obstacle_prob_min, max_evidence_step)` returns a
+   **prior-shifted, capped logit** of the red channel:
+   `clamp(log((R+ε)/(255−R+ε)) − log(prob_min/(1−prob_min)), ±max_step)`.
+   The prior shift puts the zero-crossing at `obstacle_prob_min` (not 0.5), so a
+   buoy where water is marginally more likely (`P_obs > prob_min`) still banks
+   **positive** evidence — the actual #186 fix. Defaults: R=200→+0.85, R=120→+0.50,
+   R=20→−0.85.
+2. **Graded gate (costmap path only)** — `project_observations_inverse` replaces
+   the argmax `is_obstacle_pixel`/`is_waterline_contact_pixel` with
+   `is_obstacle_ish(px) = R ≥ obstacle_prob_min·255` (same waterline-contact
+   geometry), and emits `log_odds` for contact (+) and green-water (−) cells; sky
+   /ambiguous still skipped.
+3. **Buffer accumulates the signed increment** — `OccupancyBuffer::accumulate(pos,
+   log_odds)` (replaces `hit()/miss()`), clamped to **asymmetric**
+   `[clear_floor=−2, obstacle_clamp=+5]` (recovery cleared→lethal ~8→~4 frames).
+4. **Graded occupancy + cost** — `occupancyAt()` maps log-odds to `−1` (no opinion:
+   unobserved or ≤`free_threshold`) / `1…99` ramp / `100` (≥`lethal_threshold`).
+   New `cost_mapping.hpp::occupancy_to_cost()` maps that to nav2 cost: `−1`
+   (untouched) / soft `1…252` / `LETHAL=254` (stays below `INSCRIBED=253`).
+5. **Graded output everywhere** — layer `updateCosts` stamps the ramp; the layer
+   publishes the graded occupancy grid; `SeaSurfaceRelayLayer` forwards the full
+   gradient (not just `≥100`). Both still only **ADD** (no-opinion never clears).
+6. **All params runtime-tunable** — `obstacle_prob_min`, `max_evidence_step`,
+   `obstacle_clamp`, `clear_floor`, `free_threshold`, `lethal_threshold`,
+   `decay_half_life_s` validate-then-apply via `onParametersSet`.
+7. **Tests** — buffer accumulate/`occupancyAt`/`validate`; `cost_mapping`
+   boundaries; graded accumulator expectations; projection log-odds signs.
+   **69 tests pass.**
 
-**Phase 2 — graded cost ramp + relay gradient (planning, PR2)**
-
-7. **Cost ramp** — map accumulated log-odds → cost in `updateCosts`:
-   `≤clear_thresh`→0, ramp `1…252`, `≥lethal_thresh`→254, NaN→untouched.
-8. **Relay full gradient** — `sea_surface_relay_layer.cpp` forwards the whole
-   `1…254` range, not only `≥100`.
-9. **Config + docs** — declare new params; update `config/README.md` + `config/`.
-10. **Tests** — ramp boundaries; relay carries intermediate costs.
-
-## Files to Change
+## Files Changed
 
 | File | Change |
 |------|--------|
-| `src/segments_projection.hpp` | `OccupancyObservation.log_odds`; compute `log(R/(255−R))` in both projections |
-| `src/occupancy_buffer.hpp` | apply arbitrary increment; asymmetric clamp params + `validate()`; (P2) `costAt()` ramp |
-| `src/sea_surface_layer.cpp` | pass `obs.log_odds` to buffer; (P2) emit cost ramp; param declarations |
-| `src/sea_surface_relay_layer.cpp` | (P2) forward full `1…254` gradient |
-| `src/segments_to_pointcloud.cpp` (+`-reflex`) | reflex gate `P(obs)>τ` |
-| `config/` + `config/README.md` | new params (`clear_floor`, `obstacle_ceiling`, `clear_thresh`, `lethal_thresh`, `reflex_tau`) |
-| `test/test_occupancy_buffer.cpp`, `test/test_segments_projection.cpp` | new cases above |
+| `include/.../segments_projection.hpp` | `OccupancyObservation.log_odds`; `pixel_log_odds()`; graded gate in `project_observations_inverse` (argmax predicates kept for the reflex/forward paths) |
+| `include/.../occupancy_buffer.hpp` | `accumulate()`; asymmetric clamp params; `occupancyAt()`; reworked `validate()`; snapshot ctor for off-lock publish |
+| `include/.../cost_mapping.hpp` (NEW) | `occupancy_to_cost()` — the one nav2-cost mapping, shared by layer + relay |
+| `include/.../occupancy_accumulator.hpp` | `AccumulateParams` gains `obstacle_prob_min`/`max_evidence_step`; uses `accumulate()` |
+| `src/sea_surface_layer.cpp` | new param block + live snapshot; graded `updateCosts`; graded publish; `onParametersSet` |
+| `src/sea_surface_relay_layer.cpp` | forward the full graded gradient via `occupancy_to_cost` |
+| `config/README.md` | param table + behavior for both layers |
+| `CMakeLists.txt`, `test/*` | `cost_mapping` link; updated/added tests |
+
+_Not changed (intentionally): `src/segments_to_pointcloud.cpp` and the argmax
+predicates — the reflex Collision-Monitor path is known-good and out of scope._
 
 ## Principles Self-Check
 
 | Principle | Consideration |
 |---|---|
 | A change includes its consequences | Relay gradient, `OccupancyObservation` consumers (#23 offline core), config docs, tests all in plan |
-| Only what's needed | Two-timescale rebuild explicitly rejected (reflex monitor owns dynamics); graded output is P2, not gold-plating |
-| Test what breaks | Log-odds tails (±∞ guard), asymmetric clamp, ramp boundaries, water-negative all get unit tests |
-| Improve incrementally | Stacked PRs: P1 fixes the operator bug + safety; P2 adds planning gradient |
+| Only what's needed | Two-timescale rebuild rejected (reflex owns dynamics); reflex-gate change dropped (CA known-good); graded output kept (user wants varying cost) |
+| Test what breaks | Log-odds tails (ε guard), asymmetric clamp, ramp boundaries, water-negative, cost-mapping boundaries — all unit-tested (69 pass) |
+| Improve incrementally | Single PR by user direction (test window); knobs runtime-tunable so behavior is refined on-water rather than across PRs |
 
 ## ADR Compliance
 
@@ -83,22 +94,35 @@ log-odds `Δ = clamp(log(R/(255−R)))`, bound recovery with an asymmetric clamp
 | If we change... | Also update... | Included? |
 |---|---|---|
 | `OccupancyObservation` struct | #23 offline bag→costmap core (consumes it — PR #24 open) | Yes — additive field; coordinate sequencing |
-| flat hit/miss → increment | any test asserting fixed ±0.85/−0.40 | Yes — Phase 1 tests |
-| binary lethal → ramp | relay (`≥100`), global planner cost weights, inflation ordering | Yes — Phase 2 + tuning note |
+| flat hit/miss → increment | tests asserting fixed ±0.85/−0.40 | Yes — accumulator/buffer tests updated to graded values |
+| binary lethal → graded ramp | relay (was `≥100`), global planner cost weights, inflation ordering | Relay + layer emit the gradient; **planner `cost_penalty`/`CostCritic` live in the echoboats/seafloor nav2 config repo — soft costs are inert for routing until set there** (see Open Questions) |
 
 ## Open Questions
 
-- **PR split** — P1 (graded evidence + asymmetric clamp + reflex gate) then P2
-  (graded ramp + relay)? Or single PR? P1 alone fixes the #186 bug.
-- **Reflex `τ`** — safety call: how confident before a faint obstacle triggers a
-  Collision Monitor stop vs. only soft-biasing the route? (surface to user)
-- **Numeric defaults** — `clear_floor`, thresholds, `τ` are provisional pending the
-  #186-bag R-distribution tuning; ship defaults that preserve current behavior at
-  the margins, then tune.
-- **#23 coordination** — sequence the `OccupancyObservation` change relative to the
-  in-flight offline-core export (PR #24).
+- **Planner cost weighting (separate repo)** — the graded ramp only biases routing
+  if `SmacPlannerHybrid.cost_penalty` / MPPI `CostCritic` are tuned in the
+  echoboats/seafloor nav2 config. Until then the gradient is visible (rviz) and the
+  controller may honor it, but global routing won't. Follow-up config task.
+- **On-water tuning** — defaults (`obstacle_prob_min=0.35`, `max_evidence_step=0.85`,
+  `clear_floor=−2`, `free_threshold=0`, `lethal_threshold=1`) are provisional; all
+  are runtime-reconfigurable. Tune `obstacle_prob_min` first (dim-buoy sensitivity)
+  against the #186 bag / live segmentation.
+- **#23 coordination** — `OccupancyObservation` gained a field (additive); coordinate
+  with the in-flight offline-core export (PR #24) on merge order.
 
 ## Estimated Scope
 
-Two stacked PRs (P1 safety/correctness, P2 planning gradient). P1 ~moderate; P2
-touches relay + planner tuning.
+Single PR (#25), implemented. Follow-up: planner-side cost-weight config in the
+echoboats/seafloor nav2 repo to activate soft-cost routing.
+
+## Implementation Notes
+
+- **Prior-shifted logit, not plain `log(R/(255−R))`.** The original plan/issue used
+  the unshifted logit (zero-crossing at P=0.5). That would still drop a buoy whose
+  pixels are red-present-but-water-dominant (`G > R`, i.e. `P_obs < 0.5`) — the
+  exact #186 case. Shifting the zero-crossing to `obstacle_prob_min` lets such
+  pixels bank positive evidence, and makes `obstacle_prob_min` the headline
+  on-water sensitivity knob. `max_evidence_step` caps a single frame (flicker
+  rejection; ~2 frames to lethal at defaults).
+- **Off-lock graded publish** uses a read-only `OccupancyBuffer` snapshot ctor so
+  `occupancyAt` remains the single source of the ramp (no duplicate mapping).
