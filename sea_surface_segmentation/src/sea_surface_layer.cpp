@@ -115,6 +115,8 @@ public:
     node->get_parameter(name_ + ".obstacle_prob_min", obstacle_prob_min_);
     declareParameter("max_evidence_step", rclcpp::ParameterValue(max_evidence_step_));
     node->get_parameter(name_ + ".max_evidence_step", max_evidence_step_);
+    declareParameter("max_pool_bins", rclcpp::ParameterValue(max_pool_bins_));
+    node->get_parameter(name_ + ".max_pool_bins", max_pool_bins_);
 
     // Validate the projection knobs at startup (they live on the layer, not in
     // OccupancyParams, so OccupancyBuffer::validate below doesn't cover them).
@@ -465,6 +467,7 @@ private:
     double min_grazing_deg;
     double obstacle_prob_min;
     double max_evidence_step;
+    bool max_pool_bins;
     std::vector<cv::Rect> mask_rects;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
@@ -474,6 +477,7 @@ private:
       min_grazing_deg = min_grazing_angle_deg_;
       obstacle_prob_min = obstacle_prob_min_;
       max_evidence_step = max_evidence_step_;
+      max_pool_bins = max_pool_bins_;
       mask_rects = src.image_mask_rects;
     }
     if (!camera_model || res <= 0.0) {
@@ -530,7 +534,8 @@ private:
       const auto observations = sea_surface_segmentation::project_observations_inverse(
         seg_image, *camera_model, camera_origin, rotation_cam_to_world,
         maximum_range, camera_origin[0], camera_origin[1], res, maximum_range,
-        /*plane_z=*/0.0, min_grazing_deg, obstacle_prob_min, max_evidence_step);
+        /*plane_z=*/0.0, min_grazing_deg, obstacle_prob_min, max_evidence_step,
+        max_pool_bins);
 
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       if (!buffer_) {
@@ -672,6 +677,7 @@ private:
     double candidate_min_grazing_deg;
     double candidate_obstacle_prob_min;
     double candidate_max_evidence_step;
+    bool candidate_max_pool_bins;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       candidate_occ = params_;
@@ -679,6 +685,7 @@ private:
       candidate_min_grazing_deg = min_grazing_angle_deg_;
       candidate_obstacle_prob_min = obstacle_prob_min_;
       candidate_max_evidence_step = max_evidence_step_;
+      candidate_max_pool_bins = max_pool_bins_;
     }
     // Per-source mask candidates: validated below, applied at the end under
     // the same lock that swaps the scalar candidates. Keyed by Source* so a
@@ -752,6 +759,8 @@ private:
             return result;
           }
           candidate_max_evidence_step = v;
+        } else if (n == name_ + ".max_pool_bins") {
+          candidate_max_pool_bins = p.as_bool();
         } else if (n == name_ + ".maximum_range") {
           const double v = p.as_double();
           if (!std::isfinite(v) || v <= 0.0) {
@@ -810,6 +819,7 @@ private:
     min_grazing_angle_deg_ = candidate_min_grazing_deg;
     obstacle_prob_min_ = candidate_obstacle_prob_min;
     max_evidence_step_ = candidate_max_evidence_step;
+    max_pool_bins_ = candidate_max_pool_bins;
     for (auto & kv : candidate_mask_updates) {
       kv.first->image_mask_rects = std::move(kv.second);
     }
@@ -834,6 +844,10 @@ private:
   // Graded evidence-model knobs (live-tunable; snapshotted per segmentsCallback).
   double obstacle_prob_min_ = 0.35;
   double max_evidence_step_ = 0.85;
+  // #26: collapse each frame's projected observations to one-per-cell by max
+  // (obstacle-preferring) so a small obstacle's forward-projected contact is not
+  // diluted to free by co-located inverse water. Live-toggleable for on-water A/B.
+  bool max_pool_bins_ = true;
   sea_surface_segmentation::OccupancyParams params_;
   std::unique_ptr<sea_surface_segmentation::OccupancyBuffer> buffer_;
 

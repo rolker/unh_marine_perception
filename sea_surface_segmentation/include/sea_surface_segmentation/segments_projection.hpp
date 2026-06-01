@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include <opencv2/core.hpp>
@@ -399,7 +400,8 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
   double plane_z = 0.0,
   double min_grazing_angle_deg = 0.0,
   double obstacle_prob_min = 0.5,
-  double max_evidence_step = 0.85)
+  double max_evidence_step = 0.85,
+  bool max_pool_bins = true)
 {
   // Graded obstacle gate: a pixel counts as obstacle-ish when its red channel
   // (255·P(obstacle)) implies P(obstacle) >= obstacle_prob_min. Replaces the
@@ -516,7 +518,41 @@ inline std::vector<OccupancyObservation> project_observations_inverse(
        pixel_log_odds(cpx[0], obstacle_prob_min, max_evidence_step)});
   }
 
-  return observations;
+  // Max-pool to one observation per accumulator cell (#26). The forward backstop
+  // above emits a contact's obstacle evidence at its true footprint, but the
+  // inverse cell loop also emits a WATER (free) observation for the cell whose
+  // centre-ray sampled adjacent water — and the downstream buffer accumulates
+  // every observation ADDITIVELY, so a small obstacle's single contact is washed
+  // out by the co-located water and the cell nets free. Collapsing each cell to
+  // its MAX (obstacle-preferring: obstacle log-odds are +ve, water -ve) lets the
+  // contact override the co-located water instead of cancelling against it, so a
+  // faint-but-real buoy marks without lowering the global obstacle threshold.
+  // Cells with only water still emit free; free coverage is unchanged.
+  // Gated for A/B + on-water rollback.
+  if (!max_pool_bins) {
+    return observations;
+  }
+  std::unordered_map<int64_t, double> bin_log_odds;
+  bin_log_odds.reserve(observations.size());
+  for (const auto & o : observations) {
+    const int ix = static_cast<int>(std::lround((o.x - cx) / res)) + n / 2;
+    const int iy = static_cast<int>(std::lround((o.y - cy) / res)) + n / 2;
+    if (ix < 0 || ix >= n || iy < 0 || iy >= n) { continue; }
+    const int64_t key = static_cast<int64_t>(iy) * n + ix;
+    auto it = bin_log_odds.find(key);
+    if (it == bin_log_odds.end() || o.log_odds > it->second) {
+      bin_log_odds[key] = o.log_odds;
+    }
+  }
+  std::vector<OccupancyObservation> pooled;
+  pooled.reserve(bin_log_odds.size());
+  for (const auto & kv : bin_log_odds) {
+    const int ix = static_cast<int>(kv.first % n);
+    const int iy = static_cast<int>(kv.first / n);
+    pooled.push_back(
+      {cx + (ix - n / 2) * res, cy + (iy - n / 2) * res, kv.second > 0.0, kv.second});
+  }
+  return pooled;
 }
 
 }  // namespace sea_surface_segmentation
