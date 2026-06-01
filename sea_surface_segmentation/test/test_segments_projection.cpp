@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -598,6 +599,49 @@ TEST(ProjectObservationsInverse, ContactCellHitsBodyCellsSkipped)
       EXPECT_LT(o.log_odds, 0.0) << "water (R=0) must yield negative graded evidence";
     }
   }
+}
+
+// #26 fix: a single waterline contact in a sea of water. The forward backstop
+// emits the contact's obstacle evidence at its footprint, but the inverse cell
+// loop emits WATER for the cell whose centre samples adjacent water. With the
+// downstream additive accumulate this washes the contact out; max-pooling each
+// cell to its (obstacle-preferring) max keeps the cell obstacle. This is the
+// buoy-not-marking case.
+TEST(ProjectObservationsInverse, MaxPoolKeepsContactOverColocatedWater)
+{
+  cv::Mat mask(12, 16, CV_8UC3, cv::Scalar(0, 200, 0));  // water everywhere
+  mask.at<cv::Vec3b>(6, 8) = cv::Vec3b(200, 0, 0);       // one contact px (water below)
+
+  const auto pooled = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, /*cx=*/0.0, /*cy=*/0.0, /*res=*/0.2, /*half_extent=*/1.5,
+    /*plane_z=*/0.0, /*min_grazing=*/0.0, /*obstacle_prob_min=*/0.5,
+    /*max_evidence_step=*/0.85, /*max_pool_bins=*/true);
+  const auto raw = project_observations_inverse(
+    mask, make_small_nadir_camera(), kNadirOrigin, nadir_rotation(),
+    /*max_range=*/100.0, /*cx=*/0.0, /*cy=*/0.0, /*res=*/0.2, /*half_extent=*/1.5,
+    /*plane_z=*/0.0, /*min_grazing=*/0.0, /*obstacle_prob_min=*/0.5,
+    /*max_evidence_step=*/0.85, /*max_pool_bins=*/false);
+
+  // Collapse invariant: at most one observation per accumulator cell.
+  std::set<std::pair<long, long>> cells;
+  for (const auto & o : pooled) {
+    const auto key = std::make_pair(std::lround(o.x / 0.2), std::lround(o.y / 0.2));
+    EXPECT_TRUE(cells.insert(key).second) << "max-pool must emit one observation per cell";
+  }
+
+  // The contact marks at least one cell, and every obstacle obs is positive.
+  auto [obstacle, free] = count_obs(pooled);
+  EXPECT_GE(obstacle, 1) << "the waterline contact must mark at least one cell";
+  EXPECT_GT(free, 0) << "surrounding water must still be cleared";
+  for (const auto & o : pooled) {
+    if (o.obstacle) {
+      EXPECT_GT(o.log_odds, 0.0);
+    }
+  }
+
+  // Un-pooled emits more observations (the per-cell duplicates the pool collapses).
+  EXPECT_GE(raw.size(), pooled.size());
 }
 
 // Cells beyond max_range (even when in-image) are dropped by the Euclidean

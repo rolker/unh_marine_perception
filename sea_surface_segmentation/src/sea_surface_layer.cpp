@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "cv_bridge/cv_bridge.hpp"
@@ -59,6 +60,12 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr seg_sub;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub;
     std::shared_ptr<image_geometry::PinholeCameraModel> camera_model;
+    // Pixel-space rectangles to mask out before projection — e.g. on-boat
+    // structures (GPS antenna, hull) that consistently sit in this camera's
+    // FOV and would otherwise back-project to false near-boat marks. Written
+    // by the param callback under costmap_mutex_; snapshotted by
+    // segmentsCallback under the same lock.
+    std::vector<cv::Rect> image_mask_rects;
   };
 
 public:
@@ -108,6 +115,8 @@ public:
     node->get_parameter(name_ + ".obstacle_prob_min", obstacle_prob_min_);
     declareParameter("max_evidence_step", rclcpp::ParameterValue(max_evidence_step_));
     node->get_parameter(name_ + ".max_evidence_step", max_evidence_step_);
+    declareParameter("max_pool_bins", rclcpp::ParameterValue(max_pool_bins_));
+    node->get_parameter(name_ + ".max_pool_bins", max_pool_bins_);
 
     // Validate the projection knobs at startup (they live on the layer, not in
     // OccupancyParams, so OccupancyBuffer::validate below doesn't cover them).
@@ -161,10 +170,26 @@ public:
       for (const auto & name : source_names) {
         declareParameter(name + ".segmentation_topic", rclcpp::ParameterValue(std::string{}));
         declareParameter(name + ".camera_info_topic", rclcpp::ParameterValue(std::string{}));
+        // Pixel-space masks for this source (e.g. on-boat structures). Flat
+        // int array of [x_min, y_min, x_max, y_max] tuples; empty = no mask.
+        // Runtime-tunable via `ros2 param set <node> <layer>.<source>.image_mask_rects`.
+        declareParameter(
+          name + ".image_mask_rects",
+          rclcpp::ParameterValue(std::vector<int64_t>{}));
         auto src = std::make_unique<Source>();
         src->name = name;
         node->get_parameter(name_ + "." + name + ".segmentation_topic", src->segmentation_topic);
         node->get_parameter(name_ + "." + name + ".camera_info_topic", src->camera_info_topic);
+        std::vector<int64_t> mask_flat;
+        node->get_parameter(name_ + "." + name + ".image_mask_rects", mask_flat);
+        std::string mask_why;
+        if (!parseMaskRects(mask_flat, src->image_mask_rects, mask_why)) {
+          RCLCPP_WARN_STREAM(
+            logger_,
+            "SeaSurfaceLayer source '" << name << "' image_mask_rects invalid ("
+              << mask_why << "); ignoring masks for this source");
+          src->image_mask_rects.clear();
+        }
         if (src->segmentation_topic.empty() || src->camera_info_topic.empty()) {
           RCLCPP_ERROR_STREAM(
             logger_,
@@ -388,6 +413,41 @@ private:
       parent->getOriginY() + parent->getSizeInCellsY() * parent->getResolution() / 2.0);
   }
 
+  // Parse a flat int array of [x_min, y_min, x_max, y_max] tuples into
+  // cv::Rect's (each rect's width/height = x_max - x_min / y_max - y_min).
+  // The parameter is intentionally a flat int array because rclcpp doesn't
+  // expose nested-list types; every 4 entries is one rectangle. Returns
+  // true on success and populates `out`; returns false and writes a reason
+  // into `why` on any validation failure (image bounds are NOT validated
+  // here — the layer doesn't know image dimensions at init time, so masks
+  // are clipped to image bounds at apply time in segmentsCallback).
+  static bool parseMaskRects(
+    const std::vector<int64_t> & flat,
+    std::vector<cv::Rect> & out,
+    std::string & why)
+  {
+    if (flat.size() % 4 != 0) {
+      why = "image_mask_rects must have a multiple of 4 ints "
+        "(x_min, y_min, x_max, y_max per rectangle)";
+      return false;
+    }
+    out.clear();
+    out.reserve(flat.size() / 4);
+    for (size_t i = 0; i < flat.size(); i += 4) {
+      const int x_min = static_cast<int>(flat[i]);
+      const int y_min = static_cast<int>(flat[i + 1]);
+      const int x_max = static_cast<int>(flat[i + 2]);
+      const int y_max = static_cast<int>(flat[i + 3]);
+      if (x_min < 0 || y_min < 0 || x_max <= x_min || y_max <= y_min) {
+        why = "image_mask_rects entry must satisfy 0 <= x_min < x_max and "
+          "0 <= y_min < y_max";
+        return false;
+      }
+      out.emplace_back(x_min, y_min, x_max - x_min, y_max - y_min);
+    }
+    return true;
+  }
+
   // Per-source segmentation callback. `src` is the source that owns this
   // subscription (captured by raw pointer in onInitialize's lambda); the
   // shared occupancy buffer accumulates evidence from every source's hits and
@@ -407,6 +467,8 @@ private:
     double min_grazing_deg;
     double obstacle_prob_min;
     double max_evidence_step;
+    bool max_pool_bins;
+    std::vector<cv::Rect> mask_rects;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       camera_model = src.camera_model;
@@ -415,6 +477,8 @@ private:
       min_grazing_deg = min_grazing_angle_deg_;
       obstacle_prob_min = obstacle_prob_min_;
       max_evidence_step = max_evidence_step_;
+      max_pool_bins = max_pool_bins_;
+      mask_rects = src.image_mask_rects;
     }
     if (!camera_model || res <= 0.0) {
       return;
@@ -425,7 +489,27 @@ private:
       const auto tf = tf_->lookupTransform(
         global_frame_id_, segments_msg->header.frame_id, segments_msg->header.stamp,
         std::chrono::seconds(1));
-      const auto image = cv_bridge::toCvShare(segments_msg, "rgb8");
+      // If this source has pixel-space masks (on-boat structures etc.), deep-
+      // copy the image and black out the masked rectangles before projection
+      // — black pixels fail both is_obstacle_ish (R near 0) and the green-
+      // dominant water check, so they contribute no observations. Rectangles
+      // are clipped to image bounds here (image dimensions weren't known at
+      // param-set time). When no masks are configured, use the cheap zero-copy
+      // toCvShare path so the common case isn't penalised.
+      cv::Mat seg_image;
+      if (mask_rects.empty()) {
+        seg_image = cv_bridge::toCvShare(segments_msg, "rgb8")->image;
+      } else {
+        auto image_copy = cv_bridge::toCvCopy(segments_msg, "rgb8");
+        const cv::Rect full(0, 0, image_copy->image.cols, image_copy->image.rows);
+        for (const auto & r : mask_rects) {
+          const cv::Rect clipped = r & full;
+          if (clipped.area() > 0) {
+            image_copy->image(clipped).setTo(cv::Vec3b(0, 0, 0));
+          }
+        }
+        seg_image = image_copy->image;
+      }
 
       const auto & t = tf.transform.translation;
       const auto & q = tf.transform.rotation;
@@ -448,9 +532,10 @@ private:
       // model's image bounds + the camera pose) would prune those before
       // projection — meaningful CPU once we sustain N>1 cameras (phase 4).
       const auto observations = sea_surface_segmentation::project_observations_inverse(
-        image->image, *camera_model, camera_origin, rotation_cam_to_world,
+        seg_image, *camera_model, camera_origin, rotation_cam_to_world,
         maximum_range, camera_origin[0], camera_origin[1], res, maximum_range,
-        /*plane_z=*/0.0, min_grazing_deg, obstacle_prob_min, max_evidence_step);
+        /*plane_z=*/0.0, min_grazing_deg, obstacle_prob_min, max_evidence_step,
+        max_pool_bins);
 
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       if (!buffer_) {
@@ -592,6 +677,7 @@ private:
     double candidate_min_grazing_deg;
     double candidate_obstacle_prob_min;
     double candidate_max_evidence_step;
+    bool candidate_max_pool_bins;
     {
       std::lock_guard<std::mutex> lock(costmap_mutex_);
       candidate_occ = params_;
@@ -599,7 +685,12 @@ private:
       candidate_min_grazing_deg = min_grazing_angle_deg_;
       candidate_obstacle_prob_min = obstacle_prob_min_;
       candidate_max_evidence_step = max_evidence_step_;
+      candidate_max_pool_bins = max_pool_bins_;
     }
+    // Per-source mask candidates: validated below, applied at the end under
+    // the same lock that swaps the scalar candidates. Keyed by Source* so a
+    // batched set targeting two sources in one call is atomic.
+    std::unordered_map<Source *, std::vector<cv::Rect>> candidate_mask_updates;
 
     // Configure-time params — subscriber re-bind / publisher re-bind isn't
     // supported here, so accepting these silently would leave the parameter
@@ -668,6 +759,8 @@ private:
             return result;
           }
           candidate_max_evidence_step = v;
+        } else if (n == name_ + ".max_pool_bins") {
+          candidate_max_pool_bins = p.as_bool();
         } else if (n == name_ + ".maximum_range") {
           const double v = p.as_double();
           if (!std::isfinite(v) || v <= 0.0) {
@@ -684,6 +777,27 @@ private:
             return result;
           }
           candidate_min_grazing_deg = v;
+        } else {
+          // Per-source pixel-space mask: <layer>.<source_name>.image_mask_rects.
+          // Match by suffix, then resolve the middle segment to a known source.
+          const std::string mask_suffix = ".image_mask_rects";
+          if (n.size() > mask_suffix.size() &&
+            n.compare(n.size() - mask_suffix.size(), mask_suffix.size(), mask_suffix) == 0)
+          {
+            for (const auto & src_uptr : sources_) {
+              if (n == name_ + "." + src_uptr->name + mask_suffix) {
+                std::vector<cv::Rect> rects;
+                std::string why_mask;
+                if (!parseMaskRects(p.as_integer_array(), rects, why_mask)) {
+                  result.successful = false;
+                  result.reason = why_mask;
+                  return result;
+                }
+                candidate_mask_updates[src_uptr.get()] = std::move(rects);
+                break;
+              }
+            }
+          }
         }
       }
     } catch (const rclcpp::exceptions::InvalidParameterTypeException & e) {
@@ -705,6 +819,10 @@ private:
     min_grazing_angle_deg_ = candidate_min_grazing_deg;
     obstacle_prob_min_ = candidate_obstacle_prob_min;
     max_evidence_step_ = candidate_max_evidence_step;
+    max_pool_bins_ = candidate_max_pool_bins;
+    for (auto & kv : candidate_mask_updates) {
+      kv.first->image_mask_rects = std::move(kv.second);
+    }
     if (buffer_) {
       buffer_->setParams(params_);
     }
@@ -726,6 +844,10 @@ private:
   // Graded evidence-model knobs (live-tunable; snapshotted per segmentsCallback).
   double obstacle_prob_min_ = 0.35;
   double max_evidence_step_ = 0.85;
+  // #26: collapse each frame's projected observations to one-per-cell by max
+  // (obstacle-preferring) so a small obstacle's forward-projected contact is not
+  // diluted to free by co-located inverse water. Live-toggleable for on-water A/B.
+  bool max_pool_bins_ = true;
   sea_surface_segmentation::OccupancyParams params_;
   std::unique_ptr<sea_surface_segmentation::OccupancyBuffer> buffer_;
 
