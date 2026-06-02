@@ -162,6 +162,12 @@ private:
   void segmentationCallback(std::shared_ptr<dai::ADatatype> data, std::deque<sensor_msgs::msg::Image>& outImageMsgs)
   {
     auto in_det = std::dynamic_pointer_cast<dai::NNData>(data);
+    if (!in_det) {
+      // The neural_network queue should only ever carry NNData, but guard the
+      // cast rather than dereference null and crash the node mid-survey — the
+      // sibling depthai_marine publishers null-check their analogous casts too.
+      return;
+    }
     auto layer_data = in_det->getLayerFp16("prediction");
 
     sensor_msgs::msg::Image image_message;
