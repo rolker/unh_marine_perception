@@ -14,6 +14,6 @@ issue: 28
 **Phases**: single
 
 ### Open questions
-- [ ] Anchoring strategy: per-message re-anchor (recommended, tracks live ROS clock /tf uses) vs frozen-at-construction (matches camera publishers)?
-- [ ] Camera-publisher frozen-anchor (ImagePublisher/FFMPEGPublisher) — defer to a separate new issue?
+- [x] Anchoring strategy — RESOLVED: per-message re-anchor for all three stamping paths.
+- [x] Camera-publisher frozen-anchor — RESOLVED: bundle into this PR (own commit), not a separate issue.
 - [ ] Confirm this lands before the June 4 dev freeze (for June 15 survey).

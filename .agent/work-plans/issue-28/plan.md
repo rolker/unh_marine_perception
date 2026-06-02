@@ -30,7 +30,23 @@ publishers use. The established conversion pattern is `depthai_marine`'s
   `localCameraInfo.header.stamp = currMsg.header.stamp`). **So fixing the Image
   stamp auto-propagates to `segmentation/camera_info`.** The `segmentation/compressed`
   sibling is an image_transport republish of the same Image → inherits the stamp too.
-  Net: the fix is the **one** Image stamp.
+- The depthai_bridge `ImageConverter` honors `setUpdateRosBaseTimeOnToRosMsg(true)`
+  in **both** consumer paths — `toRosMsgRawPtr` (used by `ImagePublisher`'s
+  `toRosMsg`) and `toRosFFMPEGPacket` (used by `FFMPEGPublisher`) each call
+  `updateRosBaseTime()` when the flag is set (verified in upstream
+  `depthai_bridge/src/ImageConverter.cpp`). So the camera-publisher frozen-anchor
+  fix is a clean one-liner per publisher.
+
+**Scope decision (Roland, 2026-06-02): bundle the frozen-anchor fix.** The camera
+publishers (`ImagePublisher`/`FFMPEGPublisher` in `depthai_marine`) freeze their
+ROS↔steady anchor at converter construction and never re-sync — the same class of
+defect, latent in this run. Leaving wrong behavior wrong isn't justified by "blast
+radius": correcting it is a bug fix, not a risky behavior change. So this PR also
+flips both converters to per-message re-anchor. With the segmentation node *also*
+re-anchoring (below), all three stamping paths use one consistent strategy, so the
+`sea_surface_tuner` δ-sweep that correlates seg-vs-ffmpeg stays ≈0 even under clock
+slew (the earlier seg-vs-camera divergence concern is thereby removed, not just
+deferred).
 
 ## Approach
 
@@ -48,13 +64,23 @@ publishers use. The established conversion pattern is `depthai_marine`'s
 3. **Replace line 162** with
    `image_message.header.stamp = deviceFrameStamp(ros_base_time_, steady_base_time_, total_ns_change_, in_det->getTimestamp());`
 4. **Enable the per-message re-anchor** (`updateBaseTime`, inside the helper) so the
-   stamp tracks the live ROS clock that `/tf` uses — see Open Question 1 for the
-   anchoring-strategy trade-off and the deferred camera-publisher frozen-anchor.
-5. **Add `test/test_segmentation_stamp.cpp`** (gtest): feed synthetic anchors + a
+   segmentation stamp tracks the live ROS clock that `/tf` uses (robust to clock
+   slew). This is the chosen anchoring strategy (resolves former Open Question 1).
+5. **Fix the camera-publisher frozen anchor (bundled).** Add
+   `image_converter_->setUpdateRosBaseTimeOnToRosMsg(true);` in
+   `depthai_marine/src/image_publisher.cpp` (after the converter is built, line 14)
+   and `converter_->setUpdateRosBaseTimeOnToRosMsg(true);` in
+   `depthai_marine/src/ffmpeg_publisher.cpp` (after line 25). One line each; both
+   converter paths honor the flag (verified against the jazzy branch source — see
+   Context). This is its **own commit** (`depthai_marine`), separate from the
+   segmentation-package commit, to keep each logical change atomic within the one PR.
+6. **Add `test/test_segmentation_stamp.cpp`** (gtest): feed synthetic anchors + a
    device timestamp offset by a known Δ, assert the returned stamp equals the
    expected capture-derived ROS time and is **not** ≈ `now()`. Register in
    `CMakeLists.txt` (`ament_add_gtest`), link `depthai_bridge` for `getFrameTime`.
-6. **Manual/offline verification** (cannot run on-device in CI): re-run
+   (The camera-publisher one-liners are flag flips on the upstream converter — not
+   meaningfully unit-testable without hardware; covered by the offline bag re-run.)
+7. **Manual/offline verification** (cannot run on-device in CI): re-run
    `sea_surface_tuner` on `bag_2026-05-29T15.56.42_ffmpeg_seg` — port horizon
    overlay should sit on the true horizon through the pier-departure turn, the
    ~t6 s yellow buoy should mark, and the δ-sweep best alignment should move from
@@ -68,6 +94,8 @@ publishers use. The established conversion pattern is `depthai_marine`'s
 | `sea_surface_segmentation/src/segmentation_stamp.hpp` (new) | Pure helper wrapping `dai::ros::updateBaseTime` + `getFrameTime` |
 | `sea_surface_segmentation/test/test_segmentation_stamp.cpp` (new) | gtest: stamp derives from device tstamp, not `now()` |
 | `sea_surface_segmentation/CMakeLists.txt` | Register the new gtest |
+| `depthai_marine/src/image_publisher.cpp` | `image_converter_->setUpdateRosBaseTimeOnToRosMsg(true)` — fix frozen anchor |
+| `depthai_marine/src/ffmpeg_publisher.cpp` | `converter_->setUpdateRosBaseTimeOnToRosMsg(true)` — fix frozen anchor |
 
 ## Principles Self-Check
 
@@ -92,26 +120,21 @@ publishers use. The established conversion pattern is `depthai_marine`'s
 | Stamp now ~123 ms earlier | TF lookups happen at an older time | Within tf buffer history and well within consumers' tolerances (costmap `transform_tolerance` 0.2 s, Collision Monitor `source_timeout` 1.0 s) — no lookup failures |
 | `recv − stamp` latency metric grows ~123 ms | Any diagnostic that alarms on stamp age | Expected/correct (stamp is now the true capture time); no code asserts on this |
 | camera_info / compressed siblings | Must carry corrected stamp | Auto-propagate (BridgePublisher:245 + image_transport) — verify in the tuner re-run |
+| Camera-publisher re-anchor (`depthai_marine`) | Affects **all** consumers of the raw / ffmpeg-h265 / camera_info topics across every platform using `depthai_marine` (all OAKs, not just segmentation) | Correctness fix (stamps track live clock); in normal NTP-locked operation (no slew) stamps are unchanged. Verify raw/h265 stamps still look correct in the bag re-run |
 
 ## Open Questions
 
-- **Anchoring strategy (recommend: re-anchor).** Per-message `updateBaseTime`
-  re-syncs the anchor to the live ROS clock each frame, so the projection-critical
-  segmentation stamp tracks the same clock `/tf` uses (robust to NTP slew). The
-  alternative — freeze the anchor at construction to exactly match the camera
-  publishers — keeps seg-vs-camera-raw stamps identical but reintroduces a slow
-  stale-pose drift under clock slew (the camera raw isn't projected, so this matters
-  less). The run showed no slew (camera/tf flat to 0.3 ms over 1021 s), so both fix
-  the 123 ms bug; re-anchor is the safer default. **Confirm.**
-- **Camera-publisher frozen-anchor follow-up.** The issue flags a *separate* latent
-  bug: `ImagePublisher`/`FFMPEGPublisher` converters freeze their anchor at
-  construction and never re-sync. It did not fire in this run. Out of scope here
-  (touches `depthai_marine`, expands the diff near the freeze) — **surface as a new
-  issue** rather than silently bundling or dropping it. Agreed to defer?
+- ~~**Anchoring strategy?**~~ **Resolved (Roland, 2026-06-02):** per-message
+  re-anchor (`updateBaseTime`) for all three stamping paths.
+- ~~**Camera-publisher frozen-anchor: defer?**~~ **Resolved (Roland, 2026-06-02):
+  bundle it.** Fixing wrong behavior is a bug fix, not a risky change — both
+  `depthai_marine` converters get the re-anchor flag in this PR (own commit).
 - **Freeze timing.** June 4 dev freeze; small high-value change for the June 15
   survey. Confirm this lands before the freeze.
 
 ## Estimated Scope
 
-Single PR (one stamp fix + pure helper + one gtest). On-device / tuner verification
-is a manual follow-up, not a CI gate.
+Single PR, **two atomic commits**: (1) segmentation stamp fix + pure helper + gtest
+(`sea_surface_segmentation`); (2) camera-publisher re-anchor flag
+(`depthai_marine`). On-device / tuner verification is a manual follow-up, not a CI
+gate.
