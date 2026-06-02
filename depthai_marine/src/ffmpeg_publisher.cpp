@@ -24,6 +24,10 @@ FFMPEGPublisher::FFMPEGPublisher(
   const std::string & resolved_frame_id = frame_id.empty() ? topic_name : frame_id;
   converter_ = std::make_shared<dai::ros::ImageConverter>(resolved_frame_id, true);
   converter_->setFFMPEGEncoding(encoding);
+  // Re-anchor the ROS<->steady base offset on every packet instead of freezing it
+  // at construction (#28) — a frozen anchor drifts from the live ROS clock under
+  // system-clock slew. toRosFFMPEGPacket honors this flag.
+  converter_->setUpdateRosBaseTimeOnToRosMsg(true);
 
   publisher_ = node_->create_publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(
     topic_name + "/image_raw/ffmpeg",

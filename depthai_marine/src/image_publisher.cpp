@@ -12,6 +12,11 @@ ImagePublisher::ImagePublisher(std::shared_ptr<rclcpp::Node> node, std::shared_p
   // CameraBase::initialize(), which derives it before getting here.
   const std::string & resolved_frame_id = frame_id.empty() ? topic_name : frame_id;
   image_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(resolved_frame_id, true);
+  // Re-anchor the ROS<->steady base offset on every frame instead of freezing it
+  // at construction (#28). A frozen anchor drifts from the live ROS clock under
+  // any system-clock slew (NTP correction), staling the published stamps; the
+  // converter honors this flag in both toRosMsg and toRosFFMPEGPacket paths.
+  image_converter_->setUpdateRosBaseTimeOnToRosMsg(true);
 
   auto camera_info = image_converter_->calibrationToCameraInfo(calibration_handler, dai::CameraBoardSocket::CAM_A, 1280, 720);
 
