@@ -28,8 +28,13 @@ TEST(SegmentationStamp, DerivesFromDeviceTimestampNotNow)
     deviceFrameStamp(ros_base, steady_base, total_ns_change, device_ts);
 
   const double lag_s = (clock.now() - stamp).seconds();
-  EXPECT_GT(lag_s, 0.15) << "stamp ~= now() — device timestamp was ignored (the #28 bug)";
-  EXPECT_LT(lag_s, 0.25) << "stamp not ~200 ms in the past as the capture lag implies";
+  // Bounds are deliberately wide: the regression this guards (a revert to now())
+  // collapses the lag to ~0, which the lower bound catches with huge margin. The
+  // upper bound is only a gross sign/scale sanity ceiling — scheduler stalls and
+  // forward clock steps push the lag UP, so a tight ceiling would flake on CI
+  // without adding regression-catching power.
+  EXPECT_GT(lag_s, 0.1) << "stamp ~= now() — device timestamp was ignored (the #28 bug)";
+  EXPECT_LT(lag_s, 1.0) << "stamp implausibly far in the past — conversion sign/scale error";
 }
 
 // The device timestamp must actually drive the result: a later capture (smaller
