@@ -55,12 +55,13 @@ deferred).
    `int64_t total_ns_change_ = 0`, captured at construction
    (`ros_base_time_ = node->get_clock()->now(); steady_base_time_ = std::chrono::steady_clock::now();`),
    mirroring `measure_timing.cpp:130-131`.
-2. **Extract a pure stamping helper** for testability — `src/segmentation_stamp.hpp`
+2. **Extract a hardware-independent stamping helper** — `src/segmentation_stamp.hpp`
    (header-only, sibling of `frame_id_resolver.hpp`):
-   `rclcpp::Time deviceFrameStamp(rclcpp::Time & ros_base, steady_tp & steady_base, int64_t & total_ns_change, steady_tp device_tstamp)`
+   `rclcpp::Time deviceFrameStamp(rclcpp::Time & ros_base, const steady_tp & steady_base, int64_t & total_ns_change, const steady_tp & device_tstamp)`
    that re-anchors (`dai::ros::updateBaseTime`) then returns `dai::ros::getFrameTime(...)`.
-   Taking the already-extracted `time_point` (not the `NNData`) keeps it free of any
-   device dependency so it unit-tests without hardware.
+   Not pure (the re-anchor reads `now()`), but taking the already-extracted
+   `time_point` (not the `NNData`) keeps it free of any device dependency so it
+   unit-tests without hardware.
 3. **Replace line 162** with
    `image_message.header.stamp = deviceFrameStamp(ros_base_time_, steady_base_time_, total_ns_change_, in_det->getTimestamp());`
 4. **Enable the per-message re-anchor** (`updateBaseTime`, inside the helper) so the
@@ -79,19 +80,41 @@ deferred).
    expected capture-derived ROS time and is **not** ≈ `now()`. Register in
    `CMakeLists.txt` (`ament_add_gtest`), link `depthai_bridge` for `getFrameTime`.
    (The camera-publisher one-liners are flag flips on the upstream converter — not
-   meaningfully unit-testable without hardware; covered by the offline bag re-run.)
-7. **Manual/offline verification** (cannot run on-device in CI): re-run
-   `sea_surface_tuner` on `bag_2026-05-29T15.56.42_ffmpeg_seg` — port horizon
-   overlay should sit on the true horizon through the pier-departure turn, the
-   ~t6 s yellow buoy should mark, and the δ-sweep best alignment should move from
-   δ≈−123 ms to δ≈0.
+   meaningfully unit-testable without hardware.)
+
+## Verification — what proves what (needs fresh data)
+
+The existing bag **cannot** verify the deployed fix: the bug *discards* the device
+timestamp inside the node, so the bag never recorded the `dai::NNData` capture
+times; its segmentation `Image` stamps are baked wrong (δ≈−123 ms forever), and the
+segmentation node is on-device (reads the OAK NN queue) so it can't be replayed from
+a bag. Three tiers, in order of what they establish:
+
+1. **gtest (`test_segmentation_stamp`) — logic only.** Exercise `deviceFrameStamp`
+   with a synthetic device timestamp ~200 ms in the past; assert the returned stamp
+   is ~200 ms behind wall-clock `now()` (i.e. capture-relative, **not** `now()`).
+   Guards the helper contract; says nothing about real poses. CI-runnable.
+2. **Bench/dockside OAK run — stamp correctness (pre-freeze gate).** Power the OAK,
+   run the fixed node pointed at *anything* (no water/buoy needed), record the
+   `*_ffmpeg_seg` streams, and check **`seg_stamp − ff_stamp ≈ 0`** per frame (was a
+   tight 123.5 ms). Same source frame, same device clock ⇒ equality is the definitive
+   proof the live stamp fix works. *This is the "test it on the boat soon" gate.*
+3. **On-water buoy scene — the actual goal (deployment).** With a fresh fixed-code
+   recording on the water: port horizon overlay sits on the true horizon through the
+   turn, the close buoy marks in the regenerated costmap, and the `sea_surface_tuner`
+   δ-sweep best-aligns at δ≈0 (not −123 ms). Belongs on deployment
+   **unh_echoboats_project11#205**, not a CI gate.
+
+The old bag's only role: re-running the tuner on it with a +123.5 ms manual
+correction re-confirms the *premise* (corrected pose → horizon aligns, buoy marks) —
+that's the issue's existing evidence, not verification of the deployed code.
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
 | `sea_surface_segmentation/src/sea_surface_segmentation.cpp` | Add `ros_base_time_`/`steady_base_time_`/`total_ns_change_` members + init; replace `now()` stamp at line 162 with `deviceFrameStamp(...)` |
-| `sea_surface_segmentation/src/segmentation_stamp.hpp` (new) | Pure helper wrapping `dai::ros::updateBaseTime` + `getFrameTime` |
+| `sea_surface_segmentation/src/segmentation_stamp.hpp` (new) | Stamping helper wrapping `dai::ros::updateBaseTime` + `getFrameTime` |
 | `sea_surface_segmentation/test/test_segmentation_stamp.cpp` (new) | gtest: stamp derives from device tstamp, not `now()` |
 | `sea_surface_segmentation/CMakeLists.txt` | Register the new gtest |
 | `depthai_marine/src/image_publisher.cpp` | `image_converter_->setUpdateRosBaseTimeOnToRosMsg(true)` — fix frozen anchor |
