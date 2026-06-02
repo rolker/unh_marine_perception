@@ -19,6 +19,7 @@
 #include "depthai_marine/image_publisher.hpp"
 
 #include "frame_id_resolver.hpp"
+#include "segmentation_stamp.hpp"
 
 class SegmentorCamera : public depthai_marine::CameraBase
 {
@@ -44,6 +45,13 @@ public:
     // and H.265 packets fell back to the bare `name` (e.g. `oak_forward`),
     // breaking TF lookups for any consumer of those topics.
     initialize(id, name, frame_id_);
+
+    // Capture the ROS<->steady base offset for stamping segmentation frames from
+    // their device capture time (#28). deviceFrameStamp() re-anchors ros_base_time_
+    // on every frame, so the exact capture instant here is immaterial — but the
+    // members must exist before the first segmentation callback fires.
+    ros_base_time_ = node->get_clock()->now();
+    steady_base_time_ = std::chrono::steady_clock::now();
 
     if (enable_nn_) {
         segmentation_queue_ = device_->getOutputQueue("neural_network", 5, false);
@@ -154,12 +162,25 @@ private:
   void segmentationCallback(std::shared_ptr<dai::ADatatype> data, std::deque<sensor_msgs::msg::Image>& outImageMsgs)
   {
     auto in_det = std::dynamic_pointer_cast<dai::NNData>(data);
+    if (!in_det) {
+      // The neural_network queue should only ever carry NNData, but guard the
+      // cast rather than dereference null and crash the node mid-survey — the
+      // sibling depthai_marine publishers null-check their analogous casts too.
+      return;
+    }
     auto layer_data = in_det->getLayerFp16("prediction");
 
     sensor_msgs::msg::Image image_message;
     image_message.header.frame_id = frame_id_;
 
-    image_message.header.stamp = node_->get_clock()->now(); 
+    // Stamp from the source frame's device capture time, NOT now() (#28). now()
+    // discarded the ~123.5 ms fixed pipeline latency, so every downstream TF
+    // lookup (SeaSurfaceLayer, segments_to_pointcloud, sea_surface_tuner)
+    // resolved a stale camera pose and close buoys never marked. BridgePublisher
+    // copies this stamp onto the camera_info sibling, and image_transport onto
+    // the compressed sibling, so this one stamp corrects the whole group.
+    image_message.header.stamp = sea_surface_segmentation::deviceFrameStamp(
+      ros_base_time_, steady_base_time_, total_ns_change_, in_det->getTimestamp());
 
     image_message.height = 96;
     image_message.width = 128;
@@ -183,6 +204,11 @@ private:
   std::string name_;
   std::string frame_id_;
   bool enable_nn_;
+  // ROS<->steady base offset for converting NNData device capture timestamps to
+  // ROS time (#28). Re-anchored per frame by deviceFrameStamp().
+  rclcpp::Time ros_base_time_;
+  std::chrono::time_point<std::chrono::steady_clock> steady_base_time_;
+  int64_t total_ns_change_ = 0;
   std::shared_ptr<dai::DataOutputQueue> segmentation_queue_;
   std::shared_ptr<dai::rosBridge::ImageConverter> segmentation_converter_;
   std::shared_ptr<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ADatatype> > segmentation_publisher_;
