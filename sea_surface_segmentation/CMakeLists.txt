@@ -172,6 +172,21 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
 
+  # segmentation_stamp.hpp is private to the executable (src/); it wraps the
+  # depthai_bridge time helpers (getFrameTime / updateBaseTime) that replaced the
+  # now() stamping in #28. Links depthai_bridge for those helpers and rclcpp for
+  # Time/Clock. No OAK hardware needed — the helper takes an already-extracted
+  # steady_clock time_point, not a dai::NNData.
+  ament_add_gtest(test_segmentation_stamp test/test_segmentation_stamp.cpp)
+  target_include_directories(test_segmentation_stamp PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_link_libraries(test_segmentation_stamp
+    depthai::core
+    depthai_bridge::depthai_bridge
+    rclcpp::rclcpp
+  )
+
   # segments_apply.hpp is an exported core header (include/, on the path via the
   # global include_directories above). Links nav2_costmap_2d_core for Costmap2D.
   ament_add_gtest(test_segments_apply test/test_segments_apply.cpp)
