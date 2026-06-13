@@ -65,8 +65,8 @@ median obstacle-probability on the detected object, on a 0–1 scale.*
 ![A buoy on the water (left) detected as an obstacle (right) at 0.98
 confidence.](figures/buoy_detection.png)
 
-![A moored sailboat with a dinghy ahead (left), both segmented as obstacles (right) at 0.92
-confidence.](figures/moored_boat_and_dinghy.png)
+![A moored sailboat and its mooring float ahead (left), both segmented as obstacles (right) at
+0.92 confidence.](figures/moored_boat_and_float.png)
 
 ## How it avoids obstacles
 
