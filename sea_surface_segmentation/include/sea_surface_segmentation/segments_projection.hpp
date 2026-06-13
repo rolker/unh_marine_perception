@@ -73,6 +73,7 @@ struct ProjectionStats
   std::size_t projected = 0;                   // points produced
   std::size_t dropped_nonfinite = 0;           // NaN/Inf ray, u, or point
   std::size_t dropped_behind_or_parallel = 0;  // ray parallel to / behind plane
+  std::size_t dropped_low_confidence = 0;      // P(obstacle) below obstacle_prob_min
 };
 
 // True if the rgb8 pixel passes the "obstacle" classification used by
@@ -173,6 +174,16 @@ inline cv::Matx33d rotation_matrix_from_quaternion(
 //                              per-call counts (obstacle pixels seen, points
 //                              produced, rays dropped). The node forwards
 //                              these to `/diagnostics`. Pass nullptr to skip.
+//   - `obstacle_prob_min`    — confidence floor in [0,1). An obstacle pixel is
+//                              projected only if P(obstacle) = R/(R+G+B) >=
+//                              this. Default 0.0 keeps the historical
+//                              "any argmax-obstacle pixel" behavior; raising it
+//                              (e.g. 0.60) rejects low-confidence returns such
+//                              as calm-water reflections, bringing the reflex
+//                              feed to parity with the costmap layer's own
+//                              obstacle_prob_min. Placed last with a default so
+//                              existing (incl. out-of-package) callers compile
+//                              unchanged.
 //
 // Behavior:
 //   - Iterates every pixel of `mask_rgb8`. Obstacle pixels (per
@@ -201,7 +212,8 @@ inline std::vector<ProjectedPoint> project_obstacle_pixels(
   const cv::Vec3d & camera_origin,
   const cv::Matx33d & rotation_cam_to_target,
   double plane_z = 0.0,
-  ProjectionStats * stats = nullptr)
+  ProjectionStats * stats = nullptr,
+  double obstacle_prob_min = 0.0)
 {
   std::vector<ProjectedPoint> points;
 
@@ -213,6 +225,24 @@ inline std::vector<ProjectedPoint> project_obstacle_pixels(
       }
       if (stats) {
         ++stats->obstacle_pixels;
+      }
+
+      // Confidence floor. The mask channels carry the per-class softmax
+      // (R = obstacle, G = water, B = sky), so P(obstacle) = R / (R+G+B).
+      // obstacle_prob_min == 0.0 disables the gate (back-compat); a positive
+      // value drops low-confidence obstacle pixels (e.g. calm-water
+      // reflections measured at ~0.55) before they ever enter the cloud.
+      if (obstacle_prob_min > 0.0) {
+        const double denom = static_cast<double>(pixel_value[0]) +
+          static_cast<double>(pixel_value[1]) + static_cast<double>(pixel_value[2]);
+        const double p_obstacle =
+          denom > 0.0 ? static_cast<double>(pixel_value[0]) / denom : 0.0;
+        if (p_obstacle < obstacle_prob_min) {
+          if (stats) {
+            ++stats->dropped_low_confidence;
+          }
+          continue;
+        }
       }
 
       // Ray direction in the camera optical frame.

@@ -200,6 +200,44 @@ TEST(ProjectObstaclePixels, NadirCenterPixelHitsOrigin)
   EXPECT_EQ(points[0].intensity, 200);
 }
 
+// The obstacle_prob_min floor drops low-confidence obstacle pixels
+// (P(obstacle) = R/(R+G+B) below the floor) before projection, keeping
+// high-confidence ones. Two R-dominant pixels under a nadir camera (both
+// project): high confidence (200,20,20) -> P≈0.83, low confidence
+// (100,90,60) -> P≈0.40 (still R-dominant, so is_obstacle_pixel passes).
+TEST(ProjectObstaclePixels, ObstacleProbMinDropsLowConfidence)
+{
+  const auto model = make_camera_model();
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  const auto rotation = nadir_rotation();
+
+  cv::Mat mask(480, 640, CV_8UC3, cv::Scalar(0, 0, 0));
+  mask.at<cv::Vec3b>(240, 320) = cv::Vec3b(200, 20, 20);   // P ≈ 0.83
+  mask.at<cv::Vec3b>(240, 100) = cv::Vec3b(100, 90, 60);   // P ≈ 0.40
+
+  // Floor disabled (default 0.0): both obstacle pixels project.
+  {
+    ProjectionStats stats;
+    const auto points =
+      project_obstacle_pixels(mask, model, camera_origin, rotation, 0.0, &stats);
+    EXPECT_EQ(stats.obstacle_pixels, 2u);
+    EXPECT_EQ(points.size(), 2u);
+    EXPECT_EQ(stats.dropped_low_confidence, 0u);
+  }
+
+  // Floor 0.60: only the high-confidence pixel survives; the 0.40 pixel is
+  // counted as a low-confidence drop.
+  {
+    ProjectionStats stats;
+    const auto points =
+      project_obstacle_pixels(mask, model, camera_origin, rotation, 0.0, &stats, 0.60);
+    EXPECT_EQ(stats.obstacle_pixels, 2u);
+    ASSERT_EQ(points.size(), 1u);
+    EXPECT_EQ(stats.dropped_low_confidence, 1u);
+    EXPECT_EQ(points[0].intensity, 200);  // the surviving high-confidence pixel
+  }
+}
+
 // A pixel to the right of the principal point under a nadir camera
 // projects to a point in the camera's right direction. With our
 // nadir_rotation, optical_+x maps to target_+x, so the projected

@@ -12,15 +12,21 @@
 #include "diagnostic_updater/diagnostic_updater.hpp"
 #include "diagnostic_msgs/msg/diagnostic_status.hpp"
 
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
+#include "rcl_interfaces/msg/floating_point_range.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"
+
 #include "cv_bridge/cv_bridge.hpp"
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "sea_surface_segmentation/segments_projection.hpp"
 
@@ -56,6 +62,50 @@ public:
     // part of the Collision Monitor polygon-sizing budget; this
     // param exists for tuning if field data demands it.
     projection_plane_z_ = declare_parameter<double>("projection_plane_z", 0.0);
+
+    // Confidence floor for the reflex obstacle feed. Mirrors the costmap
+    // SeaSurfaceLayer's obstacle_prob_min: an obstacle pixel is projected only
+    // if P(obstacle) = R/(R+G+B) >= this. Default 0.0 = off (historical
+    // behavior, no change for existing consumers); platforms raise it
+    // (BizzyBoat: 0.60) to reject low-confidence returns such as calm-water
+    // reflections. Declared with a descriptor so it is rqt_reconfigure-tunable
+    // now and bindable by the marine_control remote panel
+    // (unh_marine_autonomy#140 / ADR-0003).
+    rcl_interfaces::msg::ParameterDescriptor obstacle_prob_min_desc;
+    obstacle_prob_min_desc.description =
+      "Reflex confidence floor: project an obstacle pixel only if "
+      "P(obstacle)=R/(R+G+B) >= this. 0.0 disables the gate.";
+    obstacle_prob_min_desc.read_only = false;
+    {
+      rcl_interfaces::msg::FloatingPointRange range;
+      range.from_value = 0.0;
+      range.to_value = 1.0;
+      range.step = 0.05;
+      obstacle_prob_min_desc.floating_point_range.push_back(range);
+    }
+    obstacle_prob_min_ =
+      declare_parameter<double>("obstacle_prob_min", 0.0, obstacle_prob_min_desc);
+
+    // Keep obstacle_prob_min_ live so rqt_reconfigure / `ros2 param set` (and,
+    // later, the marine_control panel) retune it without a relaunch. Registered
+    // after the declare above, so it only fires for subsequent sets.
+    param_cb_handle_ = add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & params) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        for (const auto & p : params) {
+          if (p.get_name() == "obstacle_prob_min") {
+            const double v = p.as_double();
+            if (!std::isfinite(v) || v < 0.0 || v > 1.0) {
+              result.successful = false;
+              result.reason = "obstacle_prob_min must be finite and in [0, 1]";
+            } else {
+              obstacle_prob_min_ = v;
+            }
+          }
+        }
+        return result;
+      });
 
     tf_buffer_ =
     std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -167,8 +217,10 @@ private:
       const auto image = cv_bridge::toCvShare(segments_msg, "rgb8");
       sea_surface_segmentation::ProjectionStats stats;
       const auto points = sea_surface_segmentation::project_obstacle_pixels(
-        image->image, *camera_model_, camera_origin, rotation, projection_plane_z_, &stats);
+        image->image, *camera_model_, camera_origin, rotation, projection_plane_z_, &stats,
+        obstacle_prob_min_);
       nonfinite_dropped_ += stats.dropped_nonfinite;
+      low_confidence_dropped_ += stats.dropped_low_confidence;
 
       pcl::PointCloud<pcl::PointXYZI> cloud;
       cloud.reserve(points.size());
@@ -230,6 +282,8 @@ private:
     stat.add("clouds_published", static_cast<int>(clouds_published_));
     stat.add("tf_lookup_failures", static_cast<int>(tf_failures_));
     stat.add("nonfinite_points_dropped", static_cast<int>(nonfinite_dropped_));
+    stat.add("obstacle_prob_min", obstacle_prob_min_);
+    stat.add("low_confidence_points_dropped", static_cast<int>(low_confidence_dropped_));
 
     if (frames_received_ > 0) {
       stat.add("seconds_since_last_frame", (now() - last_frame_time_).seconds());
@@ -281,6 +335,8 @@ private:
   std::string map_frame_;
   std::string target_frame_;
   double projection_plane_z_{0.0};
+  double obstacle_prob_min_{0.0};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
 
   std::unique_ptr<diagnostic_updater::Updater> diagnostic_updater_;
 
@@ -291,6 +347,7 @@ private:
   std::size_t clouds_published_{0};
   std::size_t tf_failures_{0};
   std::size_t nonfinite_dropped_{0};
+  std::size_t low_confidence_dropped_{0};
   rclcpp::Time last_frame_time_;
   rclcpp::Time last_publish_time_;
   rclcpp::Time last_tf_failure_time_;
