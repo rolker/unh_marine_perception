@@ -174,9 +174,13 @@ inline cv::Matx33d rotation_matrix_from_quaternion(
 //                              per-call counts (obstacle pixels seen, points
 //                              produced, rays dropped). The node forwards
 //                              these to `/diagnostics`. Pass nullptr to skip.
-//   - `obstacle_prob_min`    — confidence floor in [0,1). An obstacle pixel is
+//   - `obstacle_prob_min`    — confidence floor. An obstacle pixel is
 //                              projected only if P(obstacle) = R/(R+G+B) >=
-//                              this. Default 0.0 keeps the historical
+//                              this (0.0 disables the gate; higher = stricter).
+//                              Because the mask channels are a softmax x255
+//                              (they sum to 255), R/(R+G+B) == R/255, i.e. the
+//                              same P(obstacle) the costmap layer thresholds.
+//                              Default 0.0 keeps the historical
 //                              "any argmax-obstacle pixel" behavior; raising it
 //                              (e.g. 0.60) rejects low-confidence returns such
 //                              as calm-water reflections, bringing the reflex

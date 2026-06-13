@@ -238,6 +238,25 @@ TEST(ProjectObstaclePixels, ObstacleProbMinDropsLowConfidence)
   }
 }
 
+// Boundary: a pixel at exactly P(obstacle) == floor must be KEPT — the gate is
+// `>=`, not `>`. R=120, G=B=60 -> 120/240 = 0.50 exactly; floor 0.50 keeps it.
+TEST(ProjectObstaclePixels, ObstacleProbMinBoundaryKeepsEqual)
+{
+  const auto model = make_camera_model();
+  const cv::Vec3d camera_origin(0.0, 0.0, 1.0);
+  const auto rotation = nadir_rotation();
+
+  cv::Mat mask(480, 640, CV_8UC3, cv::Scalar(0, 0, 0));
+  mask.at<cv::Vec3b>(240, 320) = cv::Vec3b(120, 60, 60);  // P = 120/240 = 0.50
+
+  ProjectionStats stats;
+  const auto points =
+    project_obstacle_pixels(mask, model, camera_origin, rotation, 0.0, &stats, 0.50);
+  EXPECT_EQ(stats.obstacle_pixels, 1u);
+  ASSERT_EQ(points.size(), 1u);  // P == floor is kept (>=)
+  EXPECT_EQ(stats.dropped_low_confidence, 0u);
+}
+
 // A pixel to the right of the principal point under a nadir camera
 // projects to a point in the camera's right direction. With our
 // nadir_rotation, optical_+x maps to target_+x, so the projected
