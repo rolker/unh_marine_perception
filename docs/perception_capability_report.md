@@ -72,13 +72,6 @@ confidence.](figures/buoy_detection.png)
 - **Conservative tuning:** uncertainty resolves toward slowing/stopping.
 - **Operator supervision:** live monitoring with instant manual takeover.
 
-![BizzyBoat's track (blue) through Little Harbour on 2026-06-02, holding clearance from a moored
-boat (red) as it transits.](figures/avoider_routing_moored_boats.png)
-
-*Above: BizzyBoat operating among moored boats, maintaining clearance during a transit. (Track
-from logged position; the planner's internal path markers were not recorded this run, so this
-shows the resulting clearance rather than the reshaping step.)*
-
 ## Honest limitations
 
 - **Calm-water reflections** (sun/cloud mirrored on glassy freshwater) can be mistaken for
