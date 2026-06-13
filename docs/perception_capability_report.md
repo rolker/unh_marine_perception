@@ -61,6 +61,9 @@ Measured detection confidence on real, logged obstacles (higher = more certain):
 ![A buoy on the water (left) detected as an obstacle (right) at 0.98
 confidence.](figures/buoy_detection.png)
 
+![A moored sailboat with a dinghy ahead (left), both segmented as obstacles (right) at 0.92
+confidence.](figures/moored_boat_and_dinghy.png)
+
 ## How it avoids obstacles
 
 - **Planner / avoider (primary layer):** continuously reshapes the followed path to pass
@@ -91,6 +94,12 @@ the main source of unnecessary slowdowns.](figures/calm_water_reflection_false_a
 
 *Above: cloud reflections on calm water mis-classified as obstacle — the false-alarm case the
 operator modes and the AI update address.*
+
+![A small floating stick/weed — the kind of low-contrast debris detected less reliably than
+solid objects.](figures/debris_example.png)
+
+*Above: small floating debris (stick/weed) — detected, but with lower confidence than solid
+objects like buoys or boats.*
 
 ## Operator controls & what's improving
 
