@@ -21,8 +21,9 @@ always operated under human supervision.**
   boat for close-range objects (stopping distance ≈ **2 m at survey speed, under a meter at
   slow, close-quarters speed**).
 - It **errs toward caution** — when unsure, it slows or stops rather than pressing on.
-- **A human operator always monitors a live feed and can take manual control at any moment.**
-  The boat is uncrewed, not unsupervised.
+- **A human operator always monitors a live feed and can take manual control at any moment** —
+  the backstop for the times the planner is unsure or picks a route the operator would rather
+  correct. The boat is uncrewed, not unsupervised.
 
 ![A moored sailboat ~8 m dead ahead (left) and the AI's segmentation (right): the boat is
 detected as an obstacle at 0.98 confidence.](figures/moored_boat_dead_ahead.png)
@@ -30,9 +31,9 @@ detected as an obstacle at 0.98 confidence.](figures/moored_boat_dead_ahead.png)
 *Above: a moored sailboat directly ahead, detected as an obstacle (red) at 0.98 confidence.*
 
 **Honest limitation:** on calm, sunny water the AI sometimes slows or stops unnecessarily when
-sun or cloud reflections on the surface look like an object. This is a nuisance, not a hazard —
-it errs toward stopping, never toward collision — and we have operator controls plus a software
-fix in progress for it (below).
+sun or cloud reflections on the surface look like an object. These false alarms cause
+unnecessary stops, not collisions — they err toward caution — and we have operator controls plus
+a software fix in progress for them (below).
 
 **For a first visit to a mooring field** we would run a slow, supervised familiarization pass
 before any autonomous operation near boats.
@@ -57,6 +58,9 @@ Measured detection confidence on real, logged obstacles (higher = more certain):
 | **Buoys** | **0.94** | detected reliably at close range |
 | **Lobster-pot floats** | **0.85** | directly relevant to survey work |
 | Docks / piers / pilings | 0.92–0.99 | detected confidently; handled by the planner |
+
+*"Detection confidence" is the perception AI's certainty that an object is an obstacle — its
+median obstacle-probability on the detected object, on a 0–1 scale.*
 
 ![A buoy on the water (left) detected as an obstacle (right) at 0.98
 confidence.](figures/buoy_detection.png)
