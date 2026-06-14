@@ -55,8 +55,9 @@ def generate_launch_description():
             default_value='0.0',
             description=(
                 'Reflex confidence floor: project an obstacle pixel only if '
-                'P(obstacle)=R/(R+G+B) >= this. 0.0 (default) disables the gate; '
-                'platforms raise it to reject low-confidence reflections.'
+                'P(obstacle)=R/(R+G+B) >= this. 0.0 (default) disables the gate. '
+                'Valid range 0.0-0.95 (the node rejects higher values). Platforms '
+                'raise it to reject low-confidence reflections.'
             ),
         ),
         LifecycleNode(
