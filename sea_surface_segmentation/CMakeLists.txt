@@ -32,6 +32,7 @@ include_directories(${grid_map_core_INC})
 # expose the same dir to downstream packages (unh_marine_perception#23).
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(lifecycle_msgs REQUIRED)
+find_package(marine_control REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(pcl_conversions REQUIRED)
@@ -79,6 +80,7 @@ target_link_libraries(segments_to_pointcloud
 
 ament_target_dependencies(segments_to_pointcloud
   cv_bridge
+  marine_control
   pcl_ros
 )
 
@@ -254,6 +256,14 @@ if(BUILD_TESTING)
   # assert obstacle points land in the forward danger sector. This
   # is the deployment-evidence regression for #17.
   add_launch_test(test/test_segments_to_pointcloud_bag.py
+    TIMEOUT 60
+  )
+
+  # marine_control device-control wiring (unh_marine_autonomy#140 / ADR-0003):
+  # brings the node to active, asserts the obstacle_prob_min floor is advertised
+  # on ~/control/state, that an in-range change applies, and that an out-of-range
+  # change is rejected (the operator cannot blind the reflex feed remotely).
+  add_launch_test(test/test_segments_to_pointcloud_control.py
     TIMEOUT 60
   )
 endif()
