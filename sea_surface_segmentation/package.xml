@@ -20,6 +20,7 @@
   <depend>image_geometry</depend>
   <depend>libopencv-dev</depend>
   <depend>lifecycle_msgs</depend>
+  <depend>marine_control</depend>
   <depend>nav2_costmap_2d</depend>
   <depend>nav_msgs</depend>
   <depend>pluginlib</depend>

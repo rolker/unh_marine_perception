@@ -16,6 +16,8 @@
 #include "rcl_interfaces/msg/floating_point_range.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
 
+#include "marine_control/control_server.hpp"
+
 #include "cv_bridge/cv_bridge.hpp"
 
 #include <pcl/point_cloud.h>
@@ -101,9 +103,11 @@ public:
     }
     obstacle_prob_min_ = get_parameter("obstacle_prob_min").as_double();
 
-    // Keep obstacle_prob_min_ live so rqt_reconfigure / `ros2 param set` (and,
-    // later, the marine_control panel) retune it without a relaunch. Guarded so
-    // a configure -> cleanup -> configure cycle registers exactly one callback.
+    // Keep obstacle_prob_min_ live so rqt_reconfigure / `ros2 param set` / the
+    // marine_control panel (bound in on_activate) retune it without a relaunch.
+    // This callback is the single owner of the 0.95 cap, so it validates
+    // operator changes arriving over marine_control too. Guarded so a
+    // configure -> cleanup -> configure cycle registers exactly one callback.
     if (!param_cb_handle_) {
       param_cb_handle_ = add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> & params) {
@@ -171,17 +175,42 @@ public:
 
   CallbackReturn on_activate(const rclcpp_lifecycle::State &state)
   {
+    // Expose the reflex confidence floor on the marine_control device panel so
+    // the operator can retune it live, bridgeable boat->operator
+    // (unh_marine_autonomy#140 / ADR-0003). Built here — not in on_configure —
+    // so the control channel exists only while the reflex feed is active
+    // (lifecycle gating per control_server.hpp), and torn down in on_deactivate.
+    //
+    // Safety (ADR-0003 D8.3): this rides the base fire-and-forget change
+    // channel. That is acceptable only because obstacle_prob_min's own on-set
+    // callback caps the value at 0.95, so an operator setting cannot blind the
+    // reflex feed. Stronger confirm/audit is the documented marine_control
+    // follow-up, not done here.
+    marine_control::ControlServerOptions control_opts;
+    control_opts.device_name = "Reflex Obstacle Filter";
+    control_server_ = std::make_shared<marine_control::ControlServer>(this, control_opts);
+    control_server_->bind_parameter("obstacle_prob_min", "P", "reflex");
     return LifecycleNode::on_activate(state);
   }
 
 
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State &state)
   {
+    // Tear down the control channel so the panel stops advertising a control
+    // for an inactive reflex, and the heartbeat timer/change sub are gone.
+    // Safe to destroy here: the node runs on a SingleThreadedExecutor, so this
+    // callback never races an in-flight ControlServer callback (control_server.hpp
+    // threading contract).
+    control_server_.reset();
     return LifecycleNode::on_deactivate(state);
   }
 
   CallbackReturn on_cleanup(const rclcpp_lifecycle::State &state)
   {
+    // Idempotent: deactivate already reset the server on the active->inactive
+    // path; reset again so a configure->cleanup (never-activated) path also
+    // leaves no dangling server.
+    control_server_.reset();
     return LifecycleNode::on_cleanup(state);
   }
 
@@ -354,6 +383,12 @@ private:
   double projection_plane_z_{0.0};
   double obstacle_prob_min_{0.0};
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
+
+  // Boat-side device-control server: publishes obstacle_prob_min as a bridgeable
+  // marine_control, applies operator changes via the bound parameter (whose
+  // on-set validation still owns the 0.95 cap). Lives only while active; see
+  // on_activate/on_deactivate.
+  std::shared_ptr<marine_control::ControlServer> control_server_;
 
   std::unique_ptr<diagnostic_updater::Updater> diagnostic_updater_;
 
