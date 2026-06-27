@@ -103,14 +103,18 @@ public:
     }
     obstacle_prob_min_ = get_parameter("obstacle_prob_min").as_double();
 
-    // Keep obstacle_prob_min_ live so rqt_reconfigure / `ros2 param set` / the
-    // marine_control panel (bound in on_activate) retune it without a relaunch.
-    // This callback is the single owner of the 0.95 cap, so it validates
-    // operator changes arriving over marine_control too. Guarded so a
-    // configure -> cleanup -> configure cycle registers exactly one callback.
+    // Validate changes to the floor from rqt_reconfigure / `ros2 param set` /
+    // the marine_control panel (bound in on_activate). This on-set callback is
+    // the single owner of the 0.95 cap and the NaN guard (the FloatingPointRange
+    // descriptor enforces the range but not NaN). It validates *only*: the
+    // cached obstacle_prob_min_ is committed in the post-set callback below, so a
+    // value rejected here — or by another parameter sharing the same set() —
+    // can never move the cache ahead of the declared parameter. Both callbacks
+    // are guarded so a configure -> cleanup -> configure cycle registers exactly
+    // one of each.
     if (!param_cb_handle_) {
       param_cb_handle_ = add_on_set_parameters_callback(
-        [this](const std::vector<rclcpp::Parameter> & params) {
+        [](const std::vector<rclcpp::Parameter> & params) {
           rcl_interfaces::msg::SetParametersResult result;
           result.successful = true;
           for (const auto & p : params) {
@@ -119,12 +123,23 @@ public:
               if (!std::isfinite(v) || v < 0.0 || v > 0.95) {
                 result.successful = false;
                 result.reason = "obstacle_prob_min must be finite and in [0, 0.95]";
-              } else {
-                obstacle_prob_min_ = v;
               }
             }
           }
           return result;
+        });
+    }
+    // Commit the validated value to the cache only after the set is applied, so
+    // obstacle_prob_min_ (read once per frame by segmentsCallback) always tracks
+    // the declared parameter — even when the change rides in a batched set().
+    if (!post_set_cb_handle_) {
+      post_set_cb_handle_ = add_post_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter> & params) {
+          for (const auto & p : params) {
+            if (p.get_name() == "obstacle_prob_min") {
+              obstacle_prob_min_ = p.as_double();
+            }
+          }
         });
     }
 
@@ -383,6 +398,7 @@ private:
   double projection_plane_z_{0.0};
   double obstacle_prob_min_{0.0};
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr post_set_cb_handle_;
 
   // Boat-side device-control server: publishes obstacle_prob_min as a bridgeable
   // marine_control, applies operator changes via the bound parameter (whose
@@ -411,6 +427,13 @@ int main(int argc, char **argv)
   rclcpp::init(argc, argv);
   auto segments_to_pointcloud = std::make_shared<SegmentsToPointCloud>();
 
+  // The SingleThreadedExecutor is load-bearing for the marine_control
+  // ControlServer threading contract (control_server.hpp): bind_parameter() runs
+  // in on_activate and reset() in on_deactivate, both on this executor thread
+  // while spinning. A single thread cannot dispatch the server's heartbeat/change
+  // callbacks concurrently with those transitions, so the unlocked binding table
+  // is safe. Switching to a MultiThreadedExecutor (or composing this node into a
+  // multi-threaded container) would void that guarantee — don't, without revisiting.
   rclcpp::executors::SingleThreadedExecutor exe;
   exe.add_node(segments_to_pointcloud->get_node_base_interface());
   exe.spin();

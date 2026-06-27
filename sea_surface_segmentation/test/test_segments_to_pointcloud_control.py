@@ -19,6 +19,10 @@ adopter — not the library in isolation:
 No camera/bag data is needed: the control channel is independent of the
 projection pipeline, so the node sits idle on its image subscriptions while the
 control server runs.
+
+The numbered scenarios above describe coverage, not execution order: unittest
+runs the methods alphabetically, and each is self-contained (it re-establishes
+any baseline it needs), so order does not matter.
 """
 
 import time
@@ -51,6 +55,11 @@ EXPECTED_MAX = 0.95
 # An in-range request the cap accepts, and an out-of-range one it must reject.
 IN_RANGE_VALUE = 0.6
 OUT_OF_RANGE_VALUE = 0.99
+# A second in-range value, distinct from IN_RANGE_VALUE, sent *after* the
+# out-of-range request. marine_control uses RELIABLE ordered delivery, so if this
+# sentinel is applied the out-of-range request was delivered and processed before
+# it — which distinguishes "rejected by the cap" from "silently dropped".
+SENTINEL_VALUE = 0.7
 
 # Heartbeat is 1 Hz; allow generous slack for lifecycle transitions + discovery.
 TEST_TIMEOUT_SECONDS = 25.0
@@ -133,6 +142,23 @@ class TestReflexControlChannel(unittest.TestCase):
         msg.value = repr(float(value))
         self.change_pub.publish(msg)
 
+    def _current_value(self):
+        item = self._find_item(self.latest) if self.latest else None
+        return None if item is None else float(item.value)
+
+    def _drive_to(self, value):
+        """Predicate that (re)sends `value` and reports whether the echo shows it.
+
+        Sending on each poll tolerates the change racing the subscription's
+        discovery/connection; RELIABLE delivery makes the repeats harmless.
+        """
+        def predicate():
+            self._send_change(value)
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            current = self._current_value()
+            return current is not None and abs(current - value) < 1e-6
+        return predicate
+
     def test_state_advertises_obstacle_prob_min(self):
         got = self._spin_until(lambda: self.latest is not None)
         self.assertTrue(
@@ -156,47 +182,48 @@ class TestReflexControlChannel(unittest.TestCase):
         self.assertEqual(item.group, 'reflex')
 
     def test_in_range_change_is_applied(self):
-        self.assertTrue(self._spin_until(lambda: self.latest is not None))
-
-        def applied():
-            self._send_change(IN_RANGE_VALUE)
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            item = self._find_item(self.latest) if self.latest else None
-            return item is not None and abs(float(item.value) - IN_RANGE_VALUE) < 1e-6
-
         self.assertTrue(
-            self._spin_until(applied),
+            self._spin_until(self._drive_to(IN_RANGE_VALUE)),
             f'in-range change to {IN_RANGE_VALUE} was not reflected in the '
             f'state echo; the change channel did not apply the bound parameter.')
 
     def test_out_of_range_change_is_rejected(self):
-        # First drive the value to a known in-range setting.
-        def applied():
-            self._send_change(IN_RANGE_VALUE)
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            item = self._find_item(self.latest) if self.latest else None
-            return item is not None and abs(float(item.value) - IN_RANGE_VALUE) < 1e-6
+        # Drive to a known in-range value first; this also proves the change
+        # channel is live in this test method (independent of test order).
+        self.assertTrue(
+            self._spin_until(self._drive_to(IN_RANGE_VALUE)),
+            'could not establish the in-range baseline before the rejection test.')
 
-        self.assertTrue(self._spin_until(applied))
-
-        # Now request an out-of-range value. The parameter's bounds (0.95 cap)
-        # must reject it: the echoed value stays at the last accepted setting.
-        # If this regresses, an operator could blind the reflex feed remotely.
+        # Request the out-of-range value, immediately followed by an in-range
+        # sentinel. Track the max value ever echoed across the wait: the cap must
+        # never be exceeded. Waiting for the sentinel to land confirms (via
+        # RELIABLE ordered delivery) that the out-of-range request was delivered
+        # and processed — not merely dropped — so the test cannot pass vacuously.
+        max_seen = IN_RANGE_VALUE
         self._send_change(OUT_OF_RANGE_VALUE)
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            rclpy.spin_once(self.node, timeout_sec=0.1)
+        self._send_change(SENTINEL_VALUE)
 
-        item = self._find_item(self.latest)
-        self.assertIsNotNone(item)
+        def sentinel_applied():
+            nonlocal max_seen
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            current = self._current_value()
+            if current is None:
+                return False
+            max_seen = max(max_seen, current)
+            return abs(current - SENTINEL_VALUE) < 1e-6
+
+        self.assertTrue(
+            self._spin_until(sentinel_applied),
+            f'sentinel change to {SENTINEL_VALUE} (sent right after the '
+            f'out-of-range request) never landed; cannot confirm the '
+            f'out-of-range request was delivered rather than dropped.')
         self.assertLessEqual(
-            float(item.value), EXPECTED_MAX,
-            f'out-of-range change to {OUT_OF_RANGE_VALUE} was accepted; the '
-            f'reflex confidence floor must stay capped at {EXPECTED_MAX} over '
-            f'the marine_control channel (ADR-0003 D8.3 safety contract).')
-        self.assertAlmostEqual(
-            float(item.value), IN_RANGE_VALUE, places=6,
-            msg='rejected change must leave the prior accepted value intact.')
+            max_seen, EXPECTED_MAX,
+            f'an echoed value exceeded the {EXPECTED_MAX} cap; the out-of-range '
+            f'change to {OUT_OF_RANGE_VALUE} was accepted. The reflex confidence '
+            f'floor must stay capped over the marine_control channel '
+            f'(ADR-0003 D8.3 safety contract) — an operator must not be able to '
+            f'blind the reflex feed remotely.')
 
 
 @launch_testing.post_shutdown_test()
