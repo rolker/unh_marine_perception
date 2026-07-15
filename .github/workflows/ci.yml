@@ -1,0 +1,82 @@
+# CI for unh_marine_perception.
+# Based on the workspace template (ros2_agent_workspace .agent/templates/ci_workflow.yml).
+
+name: CI
+
+on:
+  push:
+    branches: [jazzy]
+  pull_request:
+    branches: [jazzy]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    container:
+      image: ros:jazzy-ros-core
+
+    steps:
+      - name: Update apt
+        run: apt-get update
+
+      - name: Install ros dev tools
+        run: DEBIAN_FRONTEND=noninteractive apt-get -y install ros-dev-tools
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Init rosdep
+        run: |
+          if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+            rosdep init
+          fi
+
+      - name: Update rosdep
+        run: rosdep update
+
+      - name: Create workspace
+        run: mkdir -p ../ws/src && ln -s "$GITHUB_WORKSPACE" ../ws/src/unh_marine_perception
+
+      # sea_surface_segmentation depends on marine_control /
+      # marine_control_interfaces (device-control wiring, ADR-0003);
+      # everything else resolves via rosdep.
+      - name: Clone marine_control (source-sibling dependency, not in rosdep)
+        run: >
+          git clone --depth 1 -b jazzy
+          https://github.com/rolker/marine_control.git
+          ../ws/src/marine_control
+
+      - name: Install ROS dependencies
+        working-directory: ../ws
+        run: >
+          DEBIAN_FRONTEND=noninteractive
+          rosdep install --from-paths src --ignore-src -r -y
+
+      - name: Build
+        working-directory: ../ws
+        run: >
+          bash -c 'source /opt/ros/jazzy/setup.bash &&
+          colcon build --packages-up-to
+          depthai_marine sea_surface_segmentation
+          --cmake-args -DBUILD_TESTING=ON'
+
+      - name: Test
+        working-directory: ../ws
+        # Includes the launch_testing integrations that replay the in-repo
+        # bag fixture (no OAK hardware needed).
+        run: >
+          bash -c 'source /opt/ros/jazzy/setup.bash &&
+          source install/setup.bash &&
+          colcon test --packages-select
+          depthai_marine sea_surface_segmentation
+          --event-handlers console_direct+
+          --return-code-on-test-failure'
+
+      - name: Test results
+        working-directory: ../ws
+        run: >
+          bash -c 'source /opt/ros/jazzy/setup.bash &&
+          colcon test-result --verbose'
+        if: always()
