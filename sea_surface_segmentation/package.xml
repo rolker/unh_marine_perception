@@ -2,7 +2,7 @@
 <package format="2">
   <name>sea_surface_segmentation</name>
   <version>0.0.0</version>
-  <description>Package that compines eWaRS and depthai_ros to perform segmentation on an Luxonis Oak camera.</description>
+  <description>Sea-surface segmentation (eWaRS + depthai_ros on a Luxonis OAK camera), costmap layer plugins, and the Collision Monitor reflex pointcloud adapter.</description>
 
   <maintainer email="roland@ccom.unh.edu">Roland Arsenault</maintainer>
 
