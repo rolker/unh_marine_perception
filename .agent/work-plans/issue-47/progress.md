@@ -166,3 +166,31 @@ The plan is well-structured, correctly identifies the RVC2 no-live-dial constrai
 Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 47 --skill review-code
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-05 16:03 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-47 at `26582c9`
+**Mode**: pre-push
+**Depth**: Deep (reason: device-lifecycle teardown/rebuild under MultiThreadedExecutor; cross-package depthai_marine + sea_surface_segmentation + marine_control)
+**Must-fix**: 0 | **Suggestions**: 4
+**Round**: 2 | **Ship**: recommended — no must-fix; Round-1's 1 must-fix + 5 suggestions all addressed and verified, code is byte-identical to the implementer's verified-build SHA e6d7871
+
+### Findings
+- [ ] (suggestion) h265_bitrate_kbps now carries IntegerRange [100,10000] step 100: out-of-range OR off-grid startup overrides now abort the node at declare_parameter (behavioral change); verify cross-repo platform configs are in-range + step-100-aligned. Single-sourcing covers min/max but not step — `sea_surface_segmentation/src/sea_surface_segmentation.cpp:284-297`
+- [ ] (suggestion) Multi-camera-per-node: enableDynamicBitrate() registers validate+apply callbacks per camera on the shared node → one param set fans out to N restarts + N redundant validators; each restart blocks an executor thread up to 10s. Latent (1 cam/node today). Register node-level callbacks once / dedicated callback group — `sea_surface_segmentation/src/sea_surface_segmentation.cpp:335-352`
+- [ ] (suggestion) Coalescing precision: applied_bitrate_kbps_=target may not equal the value getPipeline() bakes if a set lands between line 106 and the atomic read at line 276 — benign (<=1 extra correct restart, never a drop) but the "skips redundant restart" claim is imprecise — `depthai_marine/src/camera_base.cpp:106,173`
+- [ ] (suggestion) Defensive: ~CameraBase doesn't cancel pending_restart_timer_ or reset the param-callback handles; unreachable in current main() but makes the class safe for reuse if a camera is destroyed while spinning — `depthai_marine/src/camera_base.cpp:252`
+
+### Notes
+- Two disjoint-lens Claude adversarial passes: Lens A found no must-fix; Lens B raised four "must-fix" claims, none survived verification — the restart_mutex_/timer_mutex_ AB/BA deadlock is a FALSE POSITIVE (the timer lambda's inner scope releases timer_mutex_ before doRestart() acquires restart_mutex_, camera_base.cpp:189-199); the residual-UAF is Round-1's accepted close-first guard (ImagePublisher destroys its BridgePublisher before its queue; the only stronger fix lives in upstream depthai_bridge); the shutdown-timer UAF is unreachable in the actual main(); the N-callback fan-out is intended. No cross-pass-confirmed must-fix.
+- Static analysis (ament_cpplint): advisory line-length (>100) on new lines only; the two other hits (camera_base.hpp:37 explicit-ctor, sea_surface_segmentation.cpp:80 redundant-virtual) are on untouched lines and skipped. Not repo-enforced (no cpplint target; pre-commit checks whitespace/yaml/xml/cmake) — not elevated, consistent with Round 1.
+- Local Adversarial skipped: no Ollama server at http://localhost:11434. Copilot off (default).
+- Governance compliant: ADR-0008 (pre/post-set callbacks + IntegerRange descriptor + SetParametersResult), ADR-0003 (marine_control ControlServer wired: find_package + ament_target_dependencies + package.xml depend), ADR-0013. Docs (docs/h265_transport.md section Dynamic bitrate) + marine_control dependency land in-PR. Plan followed with safety improvements (device_->close() first; validate/apply split).
+- Build/test: code at HEAD identical to verified SHA e6d7871 (only progress.md changed since); implementer reported depthai_marine clean, test_h265_bitrate_dynamic (8) + test_h265_params (15) passing.
+
+### Next step
+Lifecycle: **Local Review (Pre-Push)** -> push / open PR -> **triage-reviews**. Verdict is approved (no must-fix); the 4 suggestions can be applied or tracked, with Suggestion 1 (cross-repo param-range compatibility) worth confirming before deploy.
