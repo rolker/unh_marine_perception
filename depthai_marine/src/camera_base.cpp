@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace depthai_marine {
 
@@ -38,39 +40,51 @@ std::string CameraBase::profileEncoding(dai::VideoEncoderProperties::Profile pro
 
 void CameraBase::initialize(std::string id, std::string label, std::string frame_id)
 {
-  auto pipeline = getPipeline();
-
-  bool connected = false;
-  int retries = 5;
-
-  for(int i=0; i<retries; ++i) {
-      try {
-          // Using dai::Device constructor with pipeline, DeviceInfo, and usb2Mode=false
-          device_ = std::make_shared<dai::Device>(*pipeline, dai::DeviceInfo(id), false);
-          connected = true;
-          break;
-      } catch (const std::runtime_error& e) {
-          RCLCPP_WARN(node_->get_logger(), "%s: Failed to connect to device %s: %s. Retrying in 2s... (%d/%d)", label.c_str(), id.c_str(), e.what(), i+1, retries);
-          std::this_thread::sleep_for(std::chrono::seconds(2));
-      }
-  }
-
-  if (!connected) {
-      RCLCPP_ERROR(node_->get_logger(), "%s: Failed to connect after %d retries.", label.c_str(), retries);
-      throw std::runtime_error("Failed to connect to device");
-  }
-
-  RCLCPP_INFO_STREAM(node_->get_logger(), label << ": Connected to device: " <<  device_->getDeviceInfo().toString());
-
+  id_ = id;
+  label_ = label;
   // URDF-aligned default: `<label>_optical_frame` matches the
   // `image_geometry` / REP-103 convention for camera optical frames. This
   // is a behavioral change from the historical default (which was the bare
   // `label`) — callers that need the raw `label` must now pass it
   // explicitly. See sea_surface_segmentation for the pass-through pattern.
-  const std::string resolved_frame_id = frame_id.empty() ? (label + "_optical_frame") : frame_id;
+  resolved_frame_id_ = frame_id.empty() ? (label + "_optical_frame") : frame_id;
 
+  if (!connectDevice()) {
+    RCLCPP_ERROR(node_->get_logger(), "%s: Failed to connect after retries.", label_.c_str());
+    throw std::runtime_error("Failed to connect to device");
+  }
+
+  createPublishers();
+
+  // Seed the coalescing baseline with the bitrate the startup pipeline baked,
+  // so the first dynamic change is never mistaken for a no-op. Runs before the
+  // node spins (no restart can race this).
+  applied_bitrate_kbps_ = h265_bitrate_kbps_.load();
+}
+
+bool CameraBase::connectDevice()
+{
+  auto pipeline = getPipeline();
+
+  const int retries = 5;
+  for (int i = 0; i < retries; ++i) {
+    try {
+      // Using dai::Device constructor with pipeline, DeviceInfo, and usb2Mode=false
+      device_ = std::make_shared<dai::Device>(*pipeline, dai::DeviceInfo(id_), false);
+      RCLCPP_INFO_STREAM(node_->get_logger(), label_ << ": Connected to device: " << device_->getDeviceInfo().toString());
+      return true;
+    } catch (const std::runtime_error & e) {
+      RCLCPP_WARN(node_->get_logger(), "%s: Failed to connect to device %s: %s. Retrying in 2s... (%d/%d)", label_.c_str(), id_.c_str(), e.what(), i + 1, retries);
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+  }
+  return false;
+}
+
+void CameraBase::createPublishers()
+{
   if (enable_video_) {
-    camera_publisher_ = std::make_shared<ImagePublisher>(node_, device_, "camera", label, resolved_frame_id);
+    camera_publisher_ = std::make_shared<ImagePublisher>(node_, device_, "camera", label_, resolved_frame_id_);
   }
 
   if (h265_enable_) {
@@ -79,10 +93,164 @@ void CameraBase::initialize(std::string id, std::string label, std::string frame
       node_,
       device_,
       "ffmpeg",
-      label,
+      label_,
       profileEncoding(profile),
-      resolved_frame_id);
+      resolved_frame_id_);
   }
+}
+
+void CameraBase::restartPipeline()
+{
+  std::lock_guard<std::mutex> lock(restart_mutex_);
+
+  const int target = h265_bitrate_kbps_.load();
+
+  // Coalesce redundant restarts: if the running pipeline already carries the
+  // target, don't blank the stream again. This fires when a set that arrived
+  // during a prior restart was absorbed by that restart's getPipeline() (which
+  // reads the live atomic) yet the same set also scheduled its own timer — the
+  // timer's restart would otherwise be a second, needless outage. Only skip
+  // while the device is up; a pending reconnect must always proceed.
+  if (device_ && target == applied_bitrate_kbps_) {
+    RCLCPP_DEBUG(node_->get_logger(), "%s: pipeline already at h265_bitrate_kbps=%d; skipping redundant restart",
+      label_.c_str(), target);
+    return;
+  }
+
+  RCLCPP_WARN(node_->get_logger(), "%s: restarting pipeline to apply h265_bitrate_kbps=%d (expect a few seconds of stream outage)",
+    label_.c_str(), target);
+
+  // Quiesce the device before tearing anything down. The BridgePublisher-based
+  // publishers (camera_publisher_ / SegmentorCamera's segmentation_publisher_)
+  // register a DepthAI queue callback bound to `this` but — unlike
+  // FFMPEGPublisher — never removeCallback() it in their destructor. Closing
+  // the device stops its output-queue reading threads first, so no callback can
+  // fire into a half-destroyed publisher (use-after-free) during the resets
+  // below. close() leaves the `device_` handle valid (subclass hooks may still
+  // reference it) and is idempotent with the later reset().
+  if (device_) {
+    device_->close();
+  }
+
+  // Order matters: subclass-held queues/publishers must be released while
+  // the old device handle is still alive, then base publishers, then the
+  // device object itself.
+  onBeforeRestart();
+  ffmpeg_publisher_.reset();
+  camera_publisher_.reset();
+  device_.reset();
+
+  // A connect failure here must not propagate — this runs inside an executor
+  // timer callback, and an escaping exception would take down the node. A
+  // transiently-absent camera (USB renegotiation, power blip) recovers on the
+  // retry timer instead.
+  bool connected = false;
+  try {
+    connected = connectDevice();
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(node_->get_logger(), "%s: unexpected error while reconnecting: %s", label_.c_str(), e.what());
+  }
+
+  if (!connected) {
+    RCLCPP_ERROR(node_->get_logger(), "%s: reconnect failed; camera stays down, retrying in 10 s", label_.c_str());
+    scheduleRestart(std::chrono::milliseconds(10000));
+    return;
+  }
+
+  try {
+    createPublishers();
+    onAfterRestart();
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(node_->get_logger(), "%s: failed to rebuild publishers after reconnect: %s; retrying in 10 s", label_.c_str(), e.what());
+    scheduleRestart(std::chrono::milliseconds(10000));
+    return;
+  }
+
+  // Record `target` (captured before connectDevice()'s getPipeline() re-read
+  // the atomic), not a fresh read: if a concurrent set slipped in during the
+  // rebuild, the pipeline may already carry the newer value while this
+  // baseline records the older one — the set's pending timer then triggers
+  // one redundant restart that re-applies the same bitrate (one extra
+  // outage, at most). That conservative direction is deliberate: recording a
+  // fresh read instead could mark a concurrent set as applied when the
+  // pipeline missed it, silently dropping the change.
+  applied_bitrate_kbps_ = target;
+
+  RCLCPP_INFO(node_->get_logger(), "%s: pipeline restarted with h265_bitrate_kbps=%d", label_.c_str(), target);
+}
+
+void CameraBase::doRestart()
+{
+  restartPipeline();
+}
+
+void CameraBase::scheduleRestart(std::chrono::milliseconds delay)
+{
+  std::lock_guard<std::mutex> lock(timer_mutex_);
+  if (pending_restart_timer_) {
+    pending_restart_timer_->cancel();
+  }
+  pending_restart_timer_ = node_->create_wall_timer(delay, [this]() {
+    {
+      // One-shot: cancel before running so the timer never refires while a
+      // restart is in progress.
+      std::lock_guard<std::mutex> timer_lock(timer_mutex_);
+      if (pending_restart_timer_) {
+        pending_restart_timer_->cancel();
+      }
+    }
+    doRestart();
+  });
+}
+
+bool CameraBase::validateBitrateKbps(int64_t bitrate_kbps)
+{
+  return bitrate_kbps >= kH265BitrateMinKbps && bitrate_kbps <= kH265BitrateMaxKbps;
+}
+
+void CameraBase::enableDynamicBitrate()
+{
+  // Pre-set hook: validation only — never mutate state here, another
+  // parameter in the same atomic set operation may still be rejected.
+  bitrate_validate_cb_ = node_->add_on_set_parameters_callback(
+    [](const std::vector<rclcpp::Parameter> & params) {
+      rcl_interfaces::msg::SetParametersResult result;
+      result.successful = true;
+      for (const auto & p : params) {
+        if (p.get_name() == "h265_bitrate_kbps" && !validateBitrateKbps(p.as_int())) {
+          result.successful = false;
+          result.reason = "h265_bitrate_kbps must be within [" +
+            std::to_string(kH265BitrateMinKbps) + ", " +
+            std::to_string(kH265BitrateMaxKbps) + "] kbps";
+        }
+      }
+      return result;
+    });
+
+  // Post-set hook: react to the accepted value.
+  bitrate_apply_cb_ = node_->add_post_set_parameters_callback(
+    [this](const std::vector<rclcpp::Parameter> & params) {
+      for (const auto & p : params) {
+        if (p.get_name() != "h265_bitrate_kbps") {
+          continue;
+        }
+        const int new_kbps = static_cast<int>(p.as_int());
+        const int old_kbps = h265_bitrate_kbps_.exchange(new_kbps);
+        if (new_kbps == old_kbps) {
+          continue;  // no-op set — don't blank the stream for nothing
+        }
+        if (!h265_enable_) {
+          RCLCPP_INFO(node_->get_logger(), "%s: h265_bitrate_kbps=%d stored (H.265 disabled — applies if enabled later; no restart)",
+            label_.c_str(), new_kbps);
+          continue;
+        }
+        RCLCPP_WARN(node_->get_logger(), "%s: h265_bitrate_kbps %d -> %d; scheduling pipeline restart (~3-6 s stream outage)",
+          label_.c_str(), old_kbps, new_kbps);
+        // Short deferral coalesces rapid successive sets into one restart
+        // and moves the multi-second restart off the parameter-service path.
+        scheduleRestart(std::chrono::milliseconds(100));
+      }
+    });
 }
 
 CameraBase::~CameraBase()
@@ -171,8 +339,10 @@ void CameraBase::enableH265(bool enable)
 
 void CameraBase::setH265BitrateKbps(int bitrate_kbps)
 {
-  if (bitrate_kbps <= 0) {
-    throw std::invalid_argument("H.265 bitrate must be > 0 kbps");
+  if (!validateBitrateKbps(bitrate_kbps)) {
+    throw std::invalid_argument(
+      "H.265 bitrate must be within [" + std::to_string(kH265BitrateMinKbps) +
+      ", " + std::to_string(kH265BitrateMaxKbps) + "] kbps");
   }
   h265_bitrate_kbps_ = bitrate_kbps;
 }

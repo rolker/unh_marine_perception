@@ -126,6 +126,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_h265_params
     depthai_marine_lib
   )
+  ament_add_gtest(test_h265_bitrate_dynamic test/test_h265_bitrate_dynamic.cpp)
+  target_link_libraries(test_h265_bitrate_dynamic
+    depthai_marine_lib
+  )
 endif()
 
 ament_package()

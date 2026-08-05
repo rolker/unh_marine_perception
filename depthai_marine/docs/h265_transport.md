@@ -57,7 +57,7 @@ separate cleanup.
 | Param | Type | Default | Purpose |
 |---|---|---|---|
 | `h265_enable` | bool | `false` | Opt-in. When `true`, the VideoEncoder branch is added to the pipeline and `FFMPEGPublisher` publishes on `<camera>/image_raw/ffmpeg`. |
-| `h265_bitrate_kbps` | int | `4000` | CBR target bitrate. Feeds `VideoEncoder::setBitrateKbps`. Calibrate per platform; starting point is the PR #3 recommendation. |
+| `h265_bitrate_kbps` | int | `4000` | CBR target bitrate. Feeds `VideoEncoder::setBitrateKbps`. Calibrate per platform; starting point is the PR #3 recommendation. **Dynamic** for adopters that call `enableDynamicBitrate()` — see [Dynamic bitrate](#dynamic-bitrate). |
 | `h265_keyframe_frequency_frames` | int | `30` | Keyframe every Nth frame. At 5 FPS that's every 6 seconds. |
 | `h265_profile` | string | `"H265_MAIN"` | `H265_MAIN`, `H264_MAIN`, `H264_BASELINE`, or `H264_HIGH`. Passed through `CameraBase::parseProfile`. |
 | `video_width` | int | `1280` | ISP output width — feeds both the encoder (`camera_->video`) and preview downscale. Increasing it gives preview more source detail to downscale from at the cost of more on-device memory. |
@@ -121,6 +121,64 @@ Node(
     ],
 )
 ```
+
+## Dynamic bitrate
+
+`h265_bitrate_kbps` can be changed at runtime on nodes that opt in via
+`CameraBase::enableDynamicBitrate()` (issue #47). `sea_surface_segmentation`
+opts in; `wide_stereo` does **not** (see the exclusion below).
+
+**Hardware constraint (the design driver).** The RVC2 / depthai-v2
+`dai::node::VideoEncoder` has no runtime control input — bitrate, keyframe
+frequency, profile, and fps are serialized to the device when the
+`dai::Device` is constructed. A truly live encoder dial is therefore
+impossible on this hardware generation; the closest achievable is an
+automatic in-place **pipeline restart**, which is what a bitrate change
+triggers.
+
+**Semantics.** An accepted `h265_bitrate_kbps` change schedules a deferred
+restart on a 100 ms one-shot timer (rapid successive sets coalesce into one
+restart at the last value). The restart tears down the publishers and the
+device, rebuilds the pipeline with the new bitrate, and reconnects using the
+existing 5×2 s retry loop:
+
+- **Outage**: expect ~3–6 s of stream blackout per camera. Every stream on
+  the restarting node blanks together — video, H.265, and the segmentation NN
+  output. On BizzyBoat each camera is its own node/process, so retuning one
+  camera leaves the other three untouched.
+- **Equal-value sets are no-ops** — the stream is not blanked when the value
+  doesn't change.
+- **`h265_enable=false`**: the value is stored (it applies if H.265 is
+  enabled later) but no restart is scheduled.
+- **Failure**: if the device does not come back within the retry loop, the
+  node logs an error and re-arms a 10 s retry timer — a transiently-absent
+  camera (USB renegotiation, power blip) recovers when it returns; the node
+  never crashes on a failed reconnect.
+- **SeaSurfaceLayer gap**: the costmap layer's occupancy decay half-life
+  (30 s default) means a ~6 s segmentation gap causes ≤ 15 % log-odds decay —
+  obstacles observed before the restart survive it.
+
+**Operator UX.** Boat-side:
+
+```bash
+ros2 param set /oak_forward h265_bitrate_kbps 300
+```
+
+Topside: `udp_bridge` carries only pub/sub — parameter services are invisible
+over the air. `sea_surface_segmentation` therefore also exposes the parameter
+through `marine_control` (ADR-0003 bridgeable device control): when
+`h265_enable=true`, the node runs a `ControlServer` that publishes the knob on
+`~/control/state` and accepts changes on `~/control/change`, rendered by the
+`rqt_operator_tools` panel. The parameter carries an `IntegerRange` descriptor
+(100–10000 kbps, step 100) that bounds both the UI and the parameter layer.
+Wiring the
+control topics into a platform's `udp_bridge` config is platform configuration
+(e.g. `unh_echoboats_project11`), not handled here.
+
+**`wide_stereo` exclusion.** `wide_stereo` runs two devices on one node with a
+cross-device left→right frame-forwarding queue; a device rebuild would
+silently invalidate that queue and break stereo sync. It does not call
+`enableDynamicBitrate()` and keeps the read-once-at-startup behavior.
 
 ## Hardware considerations
 
