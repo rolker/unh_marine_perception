@@ -79,3 +79,38 @@ The issue proposes making `h265_bitrate_kbps` a dynamic ROS 2 parameter on nodes
 
 ### Open questions
 - [ ] `wide_stereo` hosts two cameras on one node — single `h265_bitrate_kbps` param change restarts both streams simultaneously. Confirm this is acceptable, or add per-camera bitrate params if independent tuning is needed.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-08-05 14:23 +00:00
+**By**: Claude Code Agent (Claude Opus)
+<!-- Independent review: the `## Plan Authored` entry shares this workspace's
+single agent name ("Claude Code Agent") but was authored by a different model
+(Claude Sonnet) in a separate context. This is an Opus fresh-context review, so
+no author-self-review annotation is applied. -->
+
+**Plan**: `.agent/work-plans/issue-47/plan.md` at `29ba53b`
+**PR**: PR-less (`--issue 47` dispatch; branch `feature/issue-47`)
+**Verdict**: changes-requested
+
+### Findings
+- [ ] (must-fix) Teardown order inverted: step 3 resets `device_` **before** calling `onBeforeRestart()`, but the subclass hook must release its NN queue (`segmentation_queue_`) before `device_` is destroyed — exactly what the Issue Review required ("all queues released before `device_` destroyed"). Reorder to: `onBeforeRestart()` → reset base publishers → reset `device_`. — `plan.md:35`
+- [ ] (must-fix) `wide_stereo` consequence unaddressed: `wide_stereo.cpp` runs two `CameraBase` subclasses (`MainCamera`/`SecondaryCamera`) on one node and pipes left→right frames via `MainCamera::getLeftImageInQueue()` (`wide_stereo.cpp:130`). Registering the param callback in `CameraBase::initialize()` gives both cameras automatic restart, but rebuilding `device_` invalidates that cross-device forwarding queue and silently breaks stereo sync. Neither `wide_stereo.cpp` nor this consequence is in the plan. Add restart hooks to re-wire forwarding (or exclude wide_stereo from dynamic restart), and add `wide_stereo.cpp` to the file list. — `plan.md:67`
+- [ ] (must-fix) Restart reuses `initialize()`'s retry loop, which **throws** on connect failure (`camera_base.cpp:58-61`). Called from a one-shot timer on the executor, that exception propagates into the executor and can kill the node — a transient reconnect miss during a live bitrate change would be worse than the ~6 s outage it replaces. `restartPipeline()` must catch connect failure (log `RCLCPP_ERROR`, leave the camera down / schedule a retry) rather than throw. — `plan.md:35`
+- [ ] (must-fix) Device-free param-callback test not achievable as written: step 4 registers the callback inside `initialize()`, which needs a live device (5×2 s retry, then throw). Existing device-free tests deliberately never call `initialize()` (`test_h265_params.cpp`). Decouple registration/validation from device connection (e.g. a static validator or a pre-connect registration method) so step 6's tests can run device-free. — `plan.md:42`
+- [ ] (suggestion) `frame_id_` member shadow: `SegmentorCamera` already declares `private: std::string frame_id_;` (`sea_surface_segmentation.cpp:205`). Adding a protected `frame_id_` to `CameraBase` (step 1) creates two members of the same name. Name the base member distinctly (e.g. `resolved_frame_id_`) and store the **resolved** id (`label + "_optical_frame"`, `camera_base.cpp:70`) so restart's publishers match `initialize()`'s. — `plan.md:29`
+- [ ] (suggestion) DRY: `restartPipeline()` duplicates `initialize()`'s retry loop + publisher construction (`camera_base.cpp:41-85`). Extract a shared private helper called by both so they can't drift. — `plan.md:35`
+- [ ] (suggestion) Gate restart on `h265_enable_`: a bitrate change on a node with `h265_enable=false` would restart the whole pipeline (blanking video + NN) for no encoder benefit. Skip the restart (or the callback registration) when H.265 is disabled. — `plan.md:42`
+- [ ] (suggestion) Coalescing test needs a seam: verifying "rapid sets → single restart" device-free requires the timer cancel/reschedule bookkeeping to be separable from the device-touching `restartPipeline()`. State that seam explicitly in step 6 rather than "counter mock." — `plan.md:56`
+- [ ] (suggestion) ROS-convention nuance: `add_on_set_parameters_callback` is the pre-set *validation* hook; reacting to the accepted value is conventionally done via `add_post_set_parameters_callback`. Reading the new value from the callback's parameter vector (as planned) is acceptable, but note the pre/post distinction. — `plan.md:42`
+
+### Summary
+
+The plan is well-structured, correctly identifies the RVC2 no-live-dial constraint, and its deferred-restart-via-timer design is sound. But four must-fix issues block implementation: the teardown ordering is inverted relative to the Issue Review's stated safety requirement; the `wide_stereo` two-cameras-on-one-node topology (with its left→right stereo forwarding queue) is a real consequence the plan neither lists nor guards; reusing `initialize()`'s throwing retry loop can kill the node from a timer callback; and the device-free param-callback test can't run because registration is buried inside the device-dependent `initialize()`. All are concrete and addressable inline.
+
+### Recommended Actions
+- [ ] Reorder `restartPipeline()`: `onBeforeRestart()` → reset base publishers → reset `device_` → rebuild → reconstruct → `onAfterRestart()`.
+- [ ] Add `wide_stereo.cpp` to the plan: either re-wire `getLeftImageInQueue()` forwarding after restart via hooks, or exclude wide_stereo from dynamic restart; capture the stereo-forwarding consequence in the Consequences table.
+- [ ] Make `restartPipeline()` catch connect failure instead of throwing into the executor.
+- [ ] Decouple param-callback registration/validation from `initialize()` so step 6's tests are genuinely device-free; state the coalescing test seam.
+- [ ] (nice-to-have) Rename the base `frame_id_` to avoid shadowing; factor the shared connect+publisher-build helper; gate restart on `h265_enable_`.
