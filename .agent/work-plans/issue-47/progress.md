@@ -194,3 +194,19 @@ Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand of
 
 ### Next step
 Lifecycle: **Local Review (Pre-Push)** -> push / open PR -> **triage-reviews**. Verdict is approved (no must-fix); the 4 suggestions can be applied or tracked, with Suggestion 1 (cross-repo param-range compatibility) worth confirming before deploy.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-05 12:45 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #48 at `1350fd6`
+**Sources**: 3 (Copilot R1 @ `1350fd6`, Local Review (Pre-Push) R2 @ `e6d7871`, CI rollup)
+**Cross-source confirmations**: 1
+**CI**: all-pass
+
+### Findings
+- [ ] (cross-confirmed: Copilot + Local Review R2 sugg-3, trivial) Comment above `applied_bitrate_kbps_ = target` overstates the coalescing guarantee — a set landing between the `target` capture and `getPipeline()`'s atomic read yields one redundant extra restart, not "one more (correct) restart"; reword the comment to match actual behavior (conservative: redundant outage possible, silent drop impossible) — `depthai_marine/src/camera_base.cpp:169-173`
+
+### False positives
+- (none)
