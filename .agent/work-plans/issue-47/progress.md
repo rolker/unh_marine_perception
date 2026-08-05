@@ -128,15 +128,41 @@ The plan is well-structured, correctly identifies the RVC2 no-live-dial constrai
 **Round**: 1 | **Ship**: continue — one genuine use-after-free on the restart path warrants a fix + re-read
 
 ### Findings
-- [ ] (must-fix) Use-after-free on restart teardown: `BridgePublisher` (ImagePublisher `camera_publisher_` + `segmentation_publisher_`) never removes its DepthAI queue callback in `~BridgePublisher`, so resetting the publishers while `device_` still streams leaves a dangling `daiCallback` firing on the XLink thread until `device_.reset()`. Fix: quiesce device/queues before destroying those publishers, or add a removeCallback path like FFMPEGPublisher — `depthai_marine/src/camera_base.cpp:107-109`, `sea_surface_segmentation/src/sea_surface_segmentation.cpp:68-73`
-- [ ] (suggestion) Coalescing doesn't cover a differing-value set that arrives while a restart is already in progress → a second multi-second outage — `depthai_marine/src/camera_base.cpp:187-209`
-- [ ] (suggestion) `h265_enable_` read non-atomically in the apply callback while `h265_bitrate_kbps_` is atomic; safe today but asymmetric — `depthai_marine/src/camera_base.cpp:198`
-- [ ] (suggestion) Tests never exercise the production IntegerRange (100–10000); only validateBitrateKbps (>0) — add boundary/rejection cases — `depthai_marine/test/test_h265_bitrate_dynamic.cpp:49`
-- [ ] (suggestion) Layered bounds inconsistent (validateBitrateKbps 1..INT_MAX vs descriptor 100..10000) and reason string says only "must be > 0" — `depthai_marine/src/camera_base.cpp:164-166`
-- [ ] (suggestion) Plan/code drift: IntegerRange.step plan=100 vs code=1 — reconcile plan or code — `sea_surface_segmentation/src/sea_surface_segmentation.cpp:291`
+- [x] (must-fix) Use-after-free on restart teardown: `BridgePublisher` (ImagePublisher `camera_publisher_` + `segmentation_publisher_`) never removes its DepthAI queue callback in `~BridgePublisher`, so resetting the publishers while `device_` still streams leaves a dangling `daiCallback` firing on the XLink thread until `device_.reset()`. Fix: quiesce device/queues before destroying those publishers, or add a removeCallback path like FFMPEGPublisher — `depthai_marine/src/camera_base.cpp:107-109`, `sea_surface_segmentation/src/sea_surface_segmentation.cpp:68-73`
+- [x] (suggestion) Coalescing doesn't cover a differing-value set that arrives while a restart is already in progress → a second multi-second outage — `depthai_marine/src/camera_base.cpp:187-209`
+- [x] (suggestion) `h265_enable_` read non-atomically in the apply callback while `h265_bitrate_kbps_` is atomic; safe today but asymmetric — `depthai_marine/src/camera_base.cpp:198`
+- [x] (suggestion) Tests never exercise the production IntegerRange (100–10000); only validateBitrateKbps (>0) — add boundary/rejection cases — `depthai_marine/test/test_h265_bitrate_dynamic.cpp:49`
+- [x] (suggestion) Layered bounds inconsistent (validateBitrateKbps 1..INT_MAX vs descriptor 100..10000) and reason string says only "must be > 0" — `depthai_marine/src/camera_base.cpp:164-166`
+- [x] (suggestion) Plan/code drift: IntegerRange.step plan=100 vs code=1 — reconcile plan or code — `sea_surface_segmentation/src/sea_surface_segmentation.cpp:291`
 
 ### Notes
 - Static analysis (ament_cpplint) produced only advisories (line-length on new lines; missing copyright on new test file) — none enforced by this repo's toolchain (packages have no ament_cpplint target; pre-commit checks whitespace/yaml/xml/cmake only) and the copyright omission matches the sibling test_h265_params.cpp. Not elevated.
 - Local Adversarial skipped: no Ollama server at http://localhost:11434.
 - Copilot Adversarial off (default). Two disjoint-lens Claude adversarial passes both independently confirmed the must-fix (cross-pass confirmed).
 - Governance: compliant (ADR-0008 dynamic-param conventions, ADR-0013 progress vocabulary, marine_control project device-control ADR); docs + dependency land in-PR.
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-05 15:44 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-47 at `e6d7871`
+**Addressed**: Local Review (Pre-Push) 2026-08-05 15:21 +00:00 at `51fe64d` (1 must-fix + 5 suggestions, all unchecked)
+**Commits**: `a216124`, `b6b616c`, `f73baeb`, `e6d7871`
+
+### Actions
+- [x] (must-fix) Restart-path use-after-free: `restartPipeline()` now calls `device_->close()` before any publisher teardown, stopping the DepthAI output-queue reading threads so a `BridgePublisher` callback (which `~BridgePublisher` never removes) cannot fire into a half-destroyed publisher. This protects both `camera_publisher_` and `SegmentorCamera::segmentation_publisher_` (whose `onBeforeRestart()` teardown now also runs quiesced) — `depthai_marine/src/camera_base.cpp` (`a216124`)
+- [x] (suggestion) Coalescing across an in-progress restart: track `applied_bitrate_kbps_` (the bitrate baked into the running pipeline, seeded in `initialize()`, updated on each successful restart) and short-circuit a restart that would re-apply it — so a set absorbed early by an in-progress restart's `getPipeline()` no longer triggers a second outage via its own scheduled timer. `target` is captured before `getPipeline()` reads the atomic, so a late set is never dropped (at worst one extra, correct restart) — `depthai_marine/src/camera_base.cpp` (`a216124`)
+- [x] (suggestion) `h265_enable_` made `std::atomic<bool>` for symmetry with the atomic `h265_bitrate_kbps_` — `depthai_marine/include/depthai_marine/camera_base.hpp` (`b6b616c`)
+- [x] (suggestion) Tests now exercise the production IntegerRange: the device-free tests declare `h265_bitrate_kbps` with the same descriptor (100–10000, step 100) and add rejection/boundary cases (99, 100, 10000, 10001) — `depthai_marine/test/test_h265_bitrate_dynamic.cpp` (`e6d7871`)
+- [x] (suggestion) Layered bounds reconciled: `CameraBase::kH265Bitrate{Min,Max}Kbps` (100/10000) single-source `validateBitrateKbps`, the descriptor, and the callback/setter messages, which now report the real range — `depthai_marine/src/camera_base.cpp`, `sea_surface_segmentation/src/sea_surface_segmentation.cpp` (`f73baeb`)
+- [x] (suggestion) Plan/code step drift fixed: descriptor `step` 1 → 100 (operator-UI granularity per the plan), docs updated — `sea_surface_segmentation/src/sea_surface_segmentation.cpp`, `depthai_marine/docs/h265_transport.md` (`f73baeb`)
+
+### Notes
+- Commit grouping (4 commits for 6 findings): the must-fix (UAF) and the coalescing suggestion are physically interleaved in `restartPipeline()` and shipped together (`a216124`); the two descriptor-consistency findings (bounds single-sourcing + step) both edit the same IntegerRange block and shipped together (`f73baeb`). No finding was deferred — all six are fixed-and-checked.
+- Verification: `depthai_marine` built clean; `test_h265_bitrate_dynamic` (8 tests, incl. 2 new range tests) and `test_h265_params` (15 tests) pass. The `sea_surface_segmentation` node target compiles (its `marine_control` dep built from `layers/main/core_ws`); the package's full build is blocked only by an unrelated missing system dep (`libpcap.so` `-dev` symlink) needed by the separate `segments_to_pointcloud` target, pre-existing and untouched by this change.
+
+### Next step
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 47 --skill review-code
