@@ -55,6 +55,11 @@ void CameraBase::initialize(std::string id, std::string label, std::string frame
   }
 
   createPublishers();
+
+  // Seed the coalescing baseline with the bitrate the startup pipeline baked,
+  // so the first dynamic change is never mistaken for a no-op. Runs before the
+  // node spins (no restart can race this).
+  applied_bitrate_kbps_ = h265_bitrate_kbps_.load();
 }
 
 bool CameraBase::connectDevice()
@@ -98,11 +103,38 @@ void CameraBase::restartPipeline()
 {
   std::lock_guard<std::mutex> lock(restart_mutex_);
 
+  const int target = h265_bitrate_kbps_.load();
+
+  // Coalesce redundant restarts: if the running pipeline already carries the
+  // target, don't blank the stream again. This fires when a set that arrived
+  // during a prior restart was absorbed by that restart's getPipeline() (which
+  // reads the live atomic) yet the same set also scheduled its own timer — the
+  // timer's restart would otherwise be a second, needless outage. Only skip
+  // while the device is up; a pending reconnect must always proceed.
+  if (device_ && target == applied_bitrate_kbps_) {
+    RCLCPP_DEBUG(node_->get_logger(), "%s: pipeline already at h265_bitrate_kbps=%d; skipping redundant restart",
+      label_.c_str(), target);
+    return;
+  }
+
   RCLCPP_WARN(node_->get_logger(), "%s: restarting pipeline to apply h265_bitrate_kbps=%d (expect a few seconds of stream outage)",
-    label_.c_str(), h265_bitrate_kbps_.load());
+    label_.c_str(), target);
+
+  // Quiesce the device before tearing anything down. The BridgePublisher-based
+  // publishers (camera_publisher_ / SegmentorCamera's segmentation_publisher_)
+  // register a DepthAI queue callback bound to `this` but — unlike
+  // FFMPEGPublisher — never removeCallback() it in their destructor. Closing
+  // the device stops its output-queue reading threads first, so no callback can
+  // fire into a half-destroyed publisher (use-after-free) during the resets
+  // below. close() leaves the `device_` handle valid (subclass hooks may still
+  // reference it) and is idempotent with the later reset().
+  if (device_) {
+    device_->close();
+  }
 
   // Order matters: subclass-held queues/publishers must be released while
-  // the old device is still alive, then base publishers, then the device.
+  // the old device handle is still alive, then base publishers, then the
+  // device object itself.
   onBeforeRestart();
   ffmpeg_publisher_.reset();
   camera_publisher_.reset();
@@ -134,7 +166,13 @@ void CameraBase::restartPipeline()
     return;
   }
 
-  RCLCPP_INFO(node_->get_logger(), "%s: pipeline restarted with h265_bitrate_kbps=%d", label_.c_str(), h265_bitrate_kbps_.load());
+  // Record what the rebuilt pipeline carries. `target` was captured before
+  // connectDevice()'s getPipeline() re-read the atomic, so it can only lag a
+  // concurrent set, never lead it — a set that slipped in during the rebuild
+  // triggers one more (correct) restart rather than being silently skipped.
+  applied_bitrate_kbps_ = target;
+
+  RCLCPP_INFO(node_->get_logger(), "%s: pipeline restarted with h265_bitrate_kbps=%d", label_.c_str(), target);
 }
 
 void CameraBase::doRestart()

@@ -152,6 +152,13 @@ protected:
 private:
   // Serializes restarts (rapid `param set` bursts, retry-after-failure).
   std::mutex restart_mutex_;
+  // Bitrate baked into the currently-running pipeline. Seeded by
+  // `initialize()` and updated on every successful `restartPipeline()`; guarded
+  // by `restart_mutex_`. Lets a restart short-circuit when the running pipeline
+  // already carries the target — e.g. a set absorbed early by an in-progress
+  // restart's `getPipeline()` still scheduled its own timer, which would
+  // otherwise blank the stream a second time for no change.
+  int applied_bitrate_kbps_{4000};
   // Guards `pending_restart_timer_` itself (scheduled from parameter
   // callbacks, replaced from the failure path, fired by the executor).
   std::mutex timer_mutex_;
