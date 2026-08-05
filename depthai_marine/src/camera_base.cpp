@@ -166,10 +166,14 @@ void CameraBase::restartPipeline()
     return;
   }
 
-  // Record what the rebuilt pipeline carries. `target` was captured before
-  // connectDevice()'s getPipeline() re-read the atomic, so it can only lag a
-  // concurrent set, never lead it — a set that slipped in during the rebuild
-  // triggers one more (correct) restart rather than being silently skipped.
+  // Record `target` (captured before connectDevice()'s getPipeline() re-read
+  // the atomic), not a fresh read: if a concurrent set slipped in during the
+  // rebuild, the pipeline may already carry the newer value while this
+  // baseline records the older one — the set's pending timer then triggers
+  // one redundant restart that re-applies the same bitrate (one extra
+  // outage, at most). That conservative direction is deliberate: recording a
+  // fresh read instead could mark a concurrent set as applied when the
+  // pipeline missed it, silently dropping the change.
   applied_bitrate_kbps_ = target;
 
   RCLCPP_INFO(node_->get_logger(), "%s: pipeline restarted with h265_bitrate_kbps=%d", label_.c_str(), target);
