@@ -1,8 +1,8 @@
 #include "depthai_marine/camera_base.hpp"
 
 #include <chrono>
-#include <limits>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -201,7 +201,7 @@ void CameraBase::scheduleRestart(std::chrono::milliseconds delay)
 
 bool CameraBase::validateBitrateKbps(int64_t bitrate_kbps)
 {
-  return bitrate_kbps > 0 && bitrate_kbps <= std::numeric_limits<int>::max();
+  return bitrate_kbps >= kH265BitrateMinKbps && bitrate_kbps <= kH265BitrateMaxKbps;
 }
 
 void CameraBase::enableDynamicBitrate()
@@ -215,7 +215,9 @@ void CameraBase::enableDynamicBitrate()
       for (const auto & p : params) {
         if (p.get_name() == "h265_bitrate_kbps" && !validateBitrateKbps(p.as_int())) {
           result.successful = false;
-          result.reason = "h265_bitrate_kbps must be > 0";
+          result.reason = "h265_bitrate_kbps must be within [" +
+            std::to_string(kH265BitrateMinKbps) + ", " +
+            std::to_string(kH265BitrateMaxKbps) + "] kbps";
         }
       }
       return result;
@@ -334,7 +336,9 @@ void CameraBase::enableH265(bool enable)
 void CameraBase::setH265BitrateKbps(int bitrate_kbps)
 {
   if (!validateBitrateKbps(bitrate_kbps)) {
-    throw std::invalid_argument("H.265 bitrate must be > 0 kbps");
+    throw std::invalid_argument(
+      "H.265 bitrate must be within [" + std::to_string(kH265BitrateMinKbps) +
+      ", " + std::to_string(kH265BitrateMaxKbps) + "] kbps");
   }
   h265_bitrate_kbps_ = bitrate_kbps;
 }

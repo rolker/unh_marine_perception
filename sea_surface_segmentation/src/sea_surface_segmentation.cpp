@@ -285,10 +285,14 @@ public:
     bitrate_descriptor.description =
       "H.265/H.264 CBR target bitrate (kbps). Dynamic: changing it restarts "
       "the camera pipeline (~3-6 s stream outage).";
+    // Bounds single-sourced with CameraBase::validateBitrateKbps so the UI /
+    // parameter-layer range and the library validator cannot drift. step 100 is
+    // the operator-UI granularity (a 1-kbps slider is meaningless for a
+    // multi-Mbps encoder) — see the work plan.
     rcl_interfaces::msg::IntegerRange bitrate_range;
-    bitrate_range.from_value = 100;
-    bitrate_range.to_value = 10000;
-    bitrate_range.step = 1;
+    bitrate_range.from_value = depthai_marine::CameraBase::kH265BitrateMinKbps;
+    bitrate_range.to_value = depthai_marine::CameraBase::kH265BitrateMaxKbps;
+    bitrate_range.step = 100;
     bitrate_descriptor.integer_range.push_back(bitrate_range);
     declare_parameter("h265_bitrate_kbps", defaults.h265_bitrate_kbps, bitrate_descriptor);
     declare_parameter("h265_keyframe_frequency_frames", defaults.h265_keyframe_frequency_frames);

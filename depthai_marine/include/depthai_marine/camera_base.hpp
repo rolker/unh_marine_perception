@@ -70,8 +70,18 @@ public:
   // node starts spinning.
   void enableDynamicBitrate();
 
+  // Operational bounds for `h265_bitrate_kbps`, single-sourced so the parameter
+  // descriptor (IntegerRange), the pre-set validation callback, and the
+  // `setH265BitrateKbps` guard cannot drift. 100–10000 kbps brackets the
+  // per-platform calibrated values (800 on BizzyBoat, 4000 default) with
+  // headroom for 1080p H.265. See docs/h265_transport.md § Dynamic bitrate.
+  static constexpr int kH265BitrateMinKbps = 100;
+  static constexpr int kH265BitrateMaxKbps = 10000;
+
   // Shared validation for `h265_bitrate_kbps` — used by both
-  // `setH265BitrateKbps` and the dynamic-parameter callback. int64_t so the
+  // `setH265BitrateKbps` and the dynamic-parameter callback. Enforces the
+  // [kH265BitrateMinKbps, kH265BitrateMaxKbps] range (same bounds the
+  // IntegerRange descriptor applies at the parameter layer). int64_t so the
   // raw rclcpp parameter value can be checked before narrowing.
   static bool validateBitrateKbps(int64_t bitrate_kbps);
 

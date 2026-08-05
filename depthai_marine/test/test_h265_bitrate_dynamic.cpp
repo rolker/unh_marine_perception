@@ -69,14 +69,19 @@ protected:
 TEST(ValidateBitrateKbps, Bounds)
 {
   using depthai_marine::CameraBase;
+  // Reject below the operational floor and above the ceiling — the same
+  // [kH265BitrateMinKbps, kH265BitrateMaxKbps] range the IntegerRange
+  // descriptor enforces at the parameter layer (single-sourced, no drift).
   EXPECT_FALSE(CameraBase::validateBitrateKbps(0));
   EXPECT_FALSE(CameraBase::validateBitrateKbps(-1));
+  EXPECT_FALSE(CameraBase::validateBitrateKbps(CameraBase::kH265BitrateMinKbps - 1));
+  EXPECT_FALSE(CameraBase::validateBitrateKbps(CameraBase::kH265BitrateMaxKbps + 1));
   EXPECT_FALSE(
     CameraBase::validateBitrateKbps(
       static_cast<int64_t>(std::numeric_limits<int>::max()) + 1));
-  EXPECT_TRUE(CameraBase::validateBitrateKbps(1));
+  EXPECT_TRUE(CameraBase::validateBitrateKbps(CameraBase::kH265BitrateMinKbps));
+  EXPECT_TRUE(CameraBase::validateBitrateKbps(CameraBase::kH265BitrateMaxKbps));
   EXPECT_TRUE(CameraBase::validateBitrateKbps(4000));
-  EXPECT_TRUE(CameraBase::validateBitrateKbps(std::numeric_limits<int>::max()));
 }
 
 TEST_F(DynamicBitrateTest, RejectsNonPositiveValues)

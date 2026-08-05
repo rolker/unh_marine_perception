@@ -170,7 +170,8 @@ through `marine_control` (ADR-0003 bridgeable device control): when
 `h265_enable=true`, the node runs a `ControlServer` that publishes the knob on
 `~/control/state` and accepts changes on `~/control/change`, rendered by the
 `rqt_operator_tools` panel. The parameter carries an `IntegerRange` descriptor
-(100–10000 kbps) that bounds both the UI and the parameter layer. Wiring the
+(100–10000 kbps, step 100) that bounds both the UI and the parameter layer.
+Wiring the
 control topics into a platform's `udp_bridge` config is platform configuration
 (e.g. `unh_echoboats_project11`), not handled here.
 
