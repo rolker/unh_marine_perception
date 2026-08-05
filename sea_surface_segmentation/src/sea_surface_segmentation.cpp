@@ -18,6 +18,10 @@
 #include "depthai_marine/camera_base.hpp"
 #include "depthai_marine/image_publisher.hpp"
 
+#include "marine_control/control_server.hpp"
+#include "rcl_interfaces/msg/integer_range.hpp"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
+
 #include "frame_id_resolver.hpp"
 #include "segmentation_stamp.hpp"
 
@@ -53,64 +57,24 @@ public:
     ros_base_time_ = node->get_clock()->now();
     steady_base_time_ = std::chrono::steady_clock::now();
 
-    if (enable_nn_) {
-        segmentation_queue_ = device_->getOutputQueue("neural_network", 5, false);
+    setupSegmentationOutputs();
+  }
 
-        auto calibration_handler = device_->readCalibration();
+protected:
+  // Restart hooks (dynamic h265_bitrate_kbps, depthai_marine#47): the NN
+  // output queue / publisher / converter live on the device, outside
+  // CameraBase's knowledge — release them while the old device is alive,
+  // re-acquire them on the new one.
+  void onBeforeRestart() override
+  {
+    segmentation_publisher_.reset();
+    segmentation_queue_.reset();
+    segmentation_converter_.reset();
+  }
 
-        segmentation_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(frame_id_, true);
-        // The published segmentation image is 128x96 (NN output), but the actual
-        // pipeline is: camera preview at (params.preview_width x params.preview_height,
-        // typically 1280x720, 16:9) → ImageManip stretches to 512x384 (4:3) →
-        // NN downsamples to 128x96. Calling calibrationToCameraInfo directly
-        // at (128, 96) would give intrinsics that assume an isotropic scaling
-        // from the sensor — wrong, because the preview→NN-input step is an
-        // anisotropic stretch. Compute the preview-resolution intrinsics from
-        // DepthAI's calibration handler, then scale fx/cx by 128/preview_width
-        // and fy/cy by 96/preview_height to reflect the squish. Distortion
-        // coefficients are left unchanged: they're a small per-pixel correction
-        // in normalised image coordinates, and re-deriving them through a non-
-        // affine resize is non-trivial; the dominant aspect-ratio error in
-        // cell→pixel projection is what we're correcting here.
-        auto preview_camera_info = segmentation_converter_->calibrationToCameraInfo(
-          calibration_handler, dai::CameraBoardSocket::CAM_A,
-          params.preview_width, params.preview_height);
-        constexpr int kSegWidth = 128;
-        constexpr int kSegHeight = 96;
-        const double scale_x = static_cast<double>(kSegWidth) / params.preview_width;
-        const double scale_y = static_cast<double>(kSegHeight) / params.preview_height;
-        segmentation_camera_info_ = preview_camera_info;
-        segmentation_camera_info_.width = kSegWidth;
-        segmentation_camera_info_.height = kSegHeight;
-        // K (3x3 intrinsic matrix, row-major): scale fx, cx by x; fy, cy by y.
-        segmentation_camera_info_.k[0] *= scale_x;  // fx
-        segmentation_camera_info_.k[2] *= scale_x;  // cx
-        segmentation_camera_info_.k[4] *= scale_y;  // fy
-        segmentation_camera_info_.k[5] *= scale_y;  // cy
-        // P (3x4 projection matrix): same scaling on the K-equivalent entries.
-        // Tx (p[3]) and Ty (p[7]) are 0 for a monocular setup; scaling is a
-        // no-op there but kept for correctness if a stereo bridge ever fills
-        // them in.
-        segmentation_camera_info_.p[0] *= scale_x;
-        segmentation_camera_info_.p[2] *= scale_x;
-        segmentation_camera_info_.p[3] *= scale_x;
-        segmentation_camera_info_.p[5] *= scale_y;
-        segmentation_camera_info_.p[6] *= scale_y;
-        segmentation_camera_info_.p[7] *= scale_y;
-
-        segmentation_publisher_ = std::make_shared<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ADatatype> >(
-          segmentation_queue_,
-          node,
-          name+"/segmentation",
-          std::bind(&SegmentorCamera::segmentationCallback, this, std::placeholders::_1, std::placeholders::_2),
-          10,
-          segmentation_camera_info_,
-          name+"/segmentation",
-          false
-        );
-
-        segmentation_publisher_->addPublisherCallback();
-    }
+  void onAfterRestart() override
+  {
+    setupSegmentationOutputs();
   }
 
   virtual std::shared_ptr<dai::Pipeline> getPipeline() override
@@ -154,11 +118,80 @@ public:
         xlink_neural_network->setStreamName("neural_network");
         neural_network->out.link(xlink_neural_network->input);
     }
-    
+
     return pipeline;
   }
 
 private:
+  // Fetch the NN output queue from the current `device_` and build the
+  // segmentation converter/publisher. Called from the constructor and again
+  // from onAfterRestart() on every pipeline restart — the camera_info is
+  // recomputed from the (new) device handle's calibration, which is the same
+  // physical camera, so the single code path stays authoritative.
+  void setupSegmentationOutputs()
+  {
+    if (!enable_nn_) {
+      return;
+    }
+
+    segmentation_queue_ = device_->getOutputQueue("neural_network", 5, false);
+
+    auto calibration_handler = device_->readCalibration();
+
+    segmentation_converter_ = std::make_shared<dai::rosBridge::ImageConverter>(frame_id_, true);
+    // The published segmentation image is 128x96 (NN output), but the actual
+    // pipeline is: camera preview at (preview_width_ x preview_height_,
+    // typically 1280x720, 16:9) → ImageManip stretches to 512x384 (4:3) →
+    // NN downsamples to 128x96. Calling calibrationToCameraInfo directly
+    // at (128, 96) would give intrinsics that assume an isotropic scaling
+    // from the sensor — wrong, because the preview→NN-input step is an
+    // anisotropic stretch. Compute the preview-resolution intrinsics from
+    // DepthAI's calibration handler, then scale fx/cx by 128/preview_width
+    // and fy/cy by 96/preview_height to reflect the squish. Distortion
+    // coefficients are left unchanged: they're a small per-pixel correction
+    // in normalised image coordinates, and re-deriving them through a non-
+    // affine resize is non-trivial; the dominant aspect-ratio error in
+    // cell→pixel projection is what we're correcting here.
+    auto preview_camera_info = segmentation_converter_->calibrationToCameraInfo(
+      calibration_handler, dai::CameraBoardSocket::CAM_A,
+      preview_width_, preview_height_);
+    constexpr int kSegWidth = 128;
+    constexpr int kSegHeight = 96;
+    const double scale_x = static_cast<double>(kSegWidth) / preview_width_;
+    const double scale_y = static_cast<double>(kSegHeight) / preview_height_;
+    segmentation_camera_info_ = preview_camera_info;
+    segmentation_camera_info_.width = kSegWidth;
+    segmentation_camera_info_.height = kSegHeight;
+    // K (3x3 intrinsic matrix, row-major): scale fx, cx by x; fy, cy by y.
+    segmentation_camera_info_.k[0] *= scale_x;  // fx
+    segmentation_camera_info_.k[2] *= scale_x;  // cx
+    segmentation_camera_info_.k[4] *= scale_y;  // fy
+    segmentation_camera_info_.k[5] *= scale_y;  // cy
+    // P (3x4 projection matrix): same scaling on the K-equivalent entries.
+    // Tx (p[3]) and Ty (p[7]) are 0 for a monocular setup; scaling is a
+    // no-op there but kept for correctness if a stereo bridge ever fills
+    // them in.
+    segmentation_camera_info_.p[0] *= scale_x;
+    segmentation_camera_info_.p[2] *= scale_x;
+    segmentation_camera_info_.p[3] *= scale_x;
+    segmentation_camera_info_.p[5] *= scale_y;
+    segmentation_camera_info_.p[6] *= scale_y;
+    segmentation_camera_info_.p[7] *= scale_y;
+
+    segmentation_publisher_ = std::make_shared<dai::rosBridge::BridgePublisher<sensor_msgs::msg::Image, dai::ADatatype> >(
+      segmentation_queue_,
+      node_,
+      name_+"/segmentation",
+      std::bind(&SegmentorCamera::segmentationCallback, this, std::placeholders::_1, std::placeholders::_2),
+      10,
+      segmentation_camera_info_,
+      name_+"/segmentation",
+      false
+    );
+
+    segmentation_publisher_->addPublisherCallback();
+  }
+
   void segmentationCallback(std::shared_ptr<dai::ADatatype> data, std::deque<sensor_msgs::msg::Image>& outImageMsgs)
   {
     auto in_det = std::dynamic_pointer_cast<dai::NNData>(data);
@@ -242,7 +275,22 @@ public:
     declare_parameter("fps", static_cast<double>(defaults.fps));
 
     declare_parameter("h265_enable", defaults.h265_enable);
-    declare_parameter("h265_bitrate_kbps", defaults.h265_bitrate_kbps);
+    // Dynamic (depthai_marine#47): an accepted change schedules a pipeline
+    // restart (~3–6 s stream outage) — see docs/h265_transport.md § Dynamic
+    // bitrate. The IntegerRange bounds the operator UI (marine_control
+    // ControlItem) and rejects out-of-range sets at the parameter layer;
+    // 100–10000 kbps brackets the per-platform calibrated values (800 on
+    // BizzyBoat, 4000 default) with headroom for 1080p H.265.
+    rcl_interfaces::msg::ParameterDescriptor bitrate_descriptor;
+    bitrate_descriptor.description =
+      "H.265/H.264 CBR target bitrate (kbps). Dynamic: changing it restarts "
+      "the camera pipeline (~3-6 s stream outage).";
+    rcl_interfaces::msg::IntegerRange bitrate_range;
+    bitrate_range.from_value = 100;
+    bitrate_range.to_value = 10000;
+    bitrate_range.step = 1;
+    bitrate_descriptor.integer_range.push_back(bitrate_range);
+    declare_parameter("h265_bitrate_kbps", defaults.h265_bitrate_kbps, bitrate_descriptor);
     declare_parameter("h265_keyframe_frequency_frames", defaults.h265_keyframe_frequency_frames);
     declare_parameter("h265_profile", defaults.h265_profile);
   }
@@ -292,12 +340,29 @@ public:
             params,
             enable_nn,
             resolved_frame_ids[i]);
+        // Opt in to dynamic h265_bitrate_kbps (depthai_marine#47). With
+        // h265_enable=false the value is stored without a restart, so the
+        // registration is unconditional.
+        cam->enableDynamicBitrate();
         cameras_.push_back(cam);
+    }
+
+    // Expose the bitrate to the operator station (ADR-0003 bridgeable device
+    // control): udp_bridge carries only pub/sub, so `ros2 param set` is
+    // invisible topside — the ControlServer's state/change topics are the
+    // bridge-correct path. Constructed here, before the node spins, per the
+    // ControlServer threading contract (bind_parameter must not race the
+    // running callbacks). Only wired when H.265 is actually on — no point
+    // surfacing an encoder knob on a node that isn't encoding.
+    if (params.h265_enable && !cameras_.empty()) {
+      control_server_ = std::make_shared<marine_control::ControlServer>(this);
+      control_server_->bind_parameter("h265_bitrate_kbps", "kbps", "video");
     }
   }
 
 private:
   std::vector<std::shared_ptr<SegmentorCamera>> cameras_;
+  std::shared_ptr<marine_control::ControlServer> control_server_;
 };
 
 int main(int argc, char **argv)
@@ -305,12 +370,12 @@ int main(int argc, char **argv)
   rclcpp::init(argc, argv);
   auto sss = std::make_shared<SeaSurfaceSegmentation>();
   sss->initialize();
-  
+
   // Use MultiThreadedExecutor to handle callbacks from multiple cameras efficiently
   rclcpp::executors::MultiThreadedExecutor exe;
   exe.add_node(sss->get_node_base_interface());
   exe.spin();
-  
+
   rclcpp::shutdown();
 
   return 0;

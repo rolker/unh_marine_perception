@@ -57,6 +57,10 @@ target_link_libraries(sea_surface_segmentation
 
 )
 
+ament_target_dependencies(sea_surface_segmentation
+  marine_control
+)
+
 install(TARGETS sea_surface_segmentation
   DESTINATION lib/${PROJECT_NAME}
 )
