@@ -7,6 +7,8 @@
 #include <thread>
 
 #include "rclcpp/rclcpp.hpp"
+#include "rcl_interfaces/msg/integer_range.hpp"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 
 #include "depthai_marine/camera_base.hpp"
 
@@ -43,10 +45,19 @@ protected:
   void SetUp() override
   {
     node_ = std::make_shared<rclcpp::Node>("test_dynamic_bitrate");
-    // Declared before enableDynamicBitrate() registers its validation
-    // callback — same ordering as SeaSurfaceSegmentation (declare in the
-    // node constructor, register in initialize()).
-    node_->declare_parameter("h265_bitrate_kbps", 4000);
+    // Declare with the SAME IntegerRange descriptor the production node
+    // (SeaSurfaceSegmentation) uses, so these tests exercise the real
+    // parameter-layer bounds (100–10000 kbps, step 100) — not just the
+    // validateBitrateKbps floor. Declared before enableDynamicBitrate()
+    // registers its validation callback — same ordering as SeaSurfaceSegmentation
+    // (declare in the node constructor, register in initialize()).
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    rcl_interfaces::msg::IntegerRange range;
+    range.from_value = depthai_marine::CameraBase::kH265BitrateMinKbps;
+    range.to_value = depthai_marine::CameraBase::kH265BitrateMaxKbps;
+    range.step = 100;
+    descriptor.integer_range.push_back(range);
+    node_->declare_parameter("h265_bitrate_kbps", 4000, descriptor);
     camera_ = std::make_shared<CountingCamera>(node_);
   }
 
@@ -156,6 +167,51 @@ TEST_F(DynamicBitrateTest, EqualValueSetDoesNotRestart)
   spinFor(300ms);
   EXPECT_EQ(camera_->restart_count(), 0);
   EXPECT_EQ(camera_->bitrate_kbps(), 4000);
+}
+
+TEST_F(DynamicBitrateTest, DescriptorRejectsOutOfRangeValues)
+{
+  using depthai_marine::CameraBase;
+  camera_->enableH265(true);
+  camera_->enableDynamicBitrate();
+
+  // Just below the floor and just above the ceiling: the IntegerRange
+  // descriptor rejects both at the parameter layer — no restart, value
+  // unchanged. This is the production-config guard the >0 validateBitrateKbps
+  // test alone did not exercise.
+  EXPECT_FALSE(node_->set_parameter(
+      rclcpp::Parameter("h265_bitrate_kbps",
+        CameraBase::kH265BitrateMinKbps - 1)).successful);
+  EXPECT_FALSE(node_->set_parameter(
+      rclcpp::Parameter("h265_bitrate_kbps",
+        CameraBase::kH265BitrateMaxKbps + 1)).successful);
+
+  spinFor(300ms);
+  EXPECT_EQ(camera_->restart_count(), 0);
+  EXPECT_EQ(camera_->bitrate_kbps(), 4000);
+}
+
+TEST_F(DynamicBitrateTest, DescriptorAcceptsRangeBoundaries)
+{
+  using depthai_marine::CameraBase;
+  camera_->enableH265(true);
+  camera_->enableDynamicBitrate();
+
+  // Exact floor: accepted and applied.
+  EXPECT_TRUE(node_->set_parameter(
+      rclcpp::Parameter("h265_bitrate_kbps",
+        CameraBase::kH265BitrateMinKbps)).successful);
+  spinFor(400ms);
+  EXPECT_EQ(camera_->restart_count(), 1);
+  EXPECT_EQ(camera_->bitrate_kbps(), CameraBase::kH265BitrateMinKbps);
+
+  // Exact ceiling: accepted and applied (to_value is always in range).
+  EXPECT_TRUE(node_->set_parameter(
+      rclcpp::Parameter("h265_bitrate_kbps",
+        CameraBase::kH265BitrateMaxKbps)).successful);
+  spinFor(400ms);
+  EXPECT_EQ(camera_->restart_count(), 2);
+  EXPECT_EQ(camera_->bitrate_kbps(), CameraBase::kH265BitrateMaxKbps);
 }
 
 }  // namespace
