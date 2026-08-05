@@ -114,3 +114,29 @@ The plan is well-structured, correctly identifies the RVC2 no-live-dial constrai
 - [ ] Make `restartPipeline()` catch connect failure instead of throwing into the executor.
 - [ ] Decouple param-callback registration/validation from `initialize()` so step 6's tests are genuinely device-free; state the coalescing test seam.
 - [ ] (nice-to-have) Rename the base `frame_id_` to avoid shadowing; factor the shared connect+publisher-build helper; gate restart on `h265_enable_`.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-05 15:21 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-47 at `51fe64d`
+**Mode**: pre-push
+**Depth**: Deep (reason: concurrency + device-lifecycle teardown/rebuild, cross-package depthai_marine + sea_surface_segmentation + marine_control)
+**Must-fix**: 1 | **Suggestions**: 5
+**Round**: 1 | **Ship**: continue — one genuine use-after-free on the restart path warrants a fix + re-read
+
+### Findings
+- [ ] (must-fix) Use-after-free on restart teardown: `BridgePublisher` (ImagePublisher `camera_publisher_` + `segmentation_publisher_`) never removes its DepthAI queue callback in `~BridgePublisher`, so resetting the publishers while `device_` still streams leaves a dangling `daiCallback` firing on the XLink thread until `device_.reset()`. Fix: quiesce device/queues before destroying those publishers, or add a removeCallback path like FFMPEGPublisher — `depthai_marine/src/camera_base.cpp:107-109`, `sea_surface_segmentation/src/sea_surface_segmentation.cpp:68-73`
+- [ ] (suggestion) Coalescing doesn't cover a differing-value set that arrives while a restart is already in progress → a second multi-second outage — `depthai_marine/src/camera_base.cpp:187-209`
+- [ ] (suggestion) `h265_enable_` read non-atomically in the apply callback while `h265_bitrate_kbps_` is atomic; safe today but asymmetric — `depthai_marine/src/camera_base.cpp:198`
+- [ ] (suggestion) Tests never exercise the production IntegerRange (100–10000); only validateBitrateKbps (>0) — add boundary/rejection cases — `depthai_marine/test/test_h265_bitrate_dynamic.cpp:49`
+- [ ] (suggestion) Layered bounds inconsistent (validateBitrateKbps 1..INT_MAX vs descriptor 100..10000) and reason string says only "must be > 0" — `depthai_marine/src/camera_base.cpp:164-166`
+- [ ] (suggestion) Plan/code drift: IntegerRange.step plan=100 vs code=1 — reconcile plan or code — `sea_surface_segmentation/src/sea_surface_segmentation.cpp:291`
+
+### Notes
+- Static analysis (ament_cpplint) produced only advisories (line-length on new lines; missing copyright on new test file) — none enforced by this repo's toolchain (packages have no ament_cpplint target; pre-commit checks whitespace/yaml/xml/cmake only) and the copyright omission matches the sibling test_h265_params.cpp. Not elevated.
+- Local Adversarial skipped: no Ollama server at http://localhost:11434.
+- Copilot Adversarial off (default). Two disjoint-lens Claude adversarial passes both independently confirmed the must-fix (cross-pass confirmed).
+- Governance: compliant (ADR-0008 dynamic-param conventions, ADR-0013 progress vocabulary, marine_control project device-control ADR); docs + dependency land in-PR.
