@@ -67,3 +67,15 @@ The issue proposes making `h265_bitrate_kbps` a dynamic ROS 2 parameter on nodes
 - [ ] Ensure `SegmentorCamera` participates in teardown (add virtual hook or subclass override for `segmentation_queue_`).
 - [ ] Confirm SeaSurfaceLayer stale-data / occupancy-decay behavior during the restart window; document result in the PR.
 - [ ] Add integration or mock-device test covering restart-under-concurrent-callbacks (unit test alone is insufficient for this safety property).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-05 00:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-47/plan.md` at `29ba53b`
+**Branch**: feature/issue-47 at `29ba53b`
+**Phases**: single
+
+### Open questions
+- [ ] `wide_stereo` hosts two cameras on one node — single `h265_bitrate_kbps` param change restarts both streams simultaneously. Confirm this is acceptable, or add per-camera bitrate params if independent tuning is needed.
