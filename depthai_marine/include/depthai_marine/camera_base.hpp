@@ -142,7 +142,9 @@ protected:
   bool enable_video_ = true;
   float fps_ = 5.0;
 
-  bool h265_enable_ = false;
+  // Atomic to match `h265_bitrate_kbps_`: read by the parameter apply-callback
+  // on one executor thread while the restart path runs on another.
+  std::atomic<bool> h265_enable_{false};
   // Atomic: written by the parameter apply-callback on one executor thread
   // while `restartPipeline()` reads it on another.
   std::atomic<int> h265_bitrate_kbps_{4000};
