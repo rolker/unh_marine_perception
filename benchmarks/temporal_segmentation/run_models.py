@@ -3,8 +3,8 @@
 window and store per-frame 3-class softmax maps at the recorded mask geometry.
 
 Inputs:  <window>/frames.npz from extract_window.py  (N,384,512,3 uint8 RGB)
-Outputs: <window>/probs_ewasr_offline.npz   float16 (N,96,128,3)  [obstacle, water, sky]
-         <window>/probs_wasrt_h<H>.npz       float16 (N,96,128,3)
+Outputs: <window>/probs_ewasr_offline.npz   probs float16 (N,96,128,3) [obstacle, water, sky] + stamp_ns
+         <window>/probs_wasrt_h<H>.npz       probs float16 (N,96,128,3) + stamp_ns
 
 Both models get identical input: the 512x384 stretched RGB frame, ImageNet
 mean/std normalisation. That matches the on-camera eWaSR blob conversion
@@ -74,8 +74,10 @@ def run_wasrt(frames: np.ndarray, weights: str, repo: str, hist_len: int, fp16: 
     # training-only logger subclass of `LoggerCollection` at import time in
     # wasr_t/utils.py, and wasr_t/wasr_t.py imports that module. Lightning 2.x
     # removed the class. Alias it so the import succeeds; nothing in inference
-    # touches it. Kept here rather than patching the upstream checkout so the
-    # repo stays a pristine clone at a known commit.
+    # touches it. The alias is process-global for the interpreter's lifetime,
+    # which is acceptable in a standalone script. Kept here rather than patching
+    # the upstream checkout so the repo stays a pristine clone at a known commit
+    # (1b5360af2040, see README).
     for name in ("LoggerCollection", "LightningLoggerBase"):
         if not hasattr(pl_loggers, name):
             setattr(pl_loggers, name, pl_loggers.Logger)
@@ -103,14 +105,10 @@ def run_wasrt(frames: np.ndarray, weights: str, repo: str, hist_len: int, fp16: 
             if fp16:
                 x = x.half()
             logits = model({"image": x})["out"]  # (1,3,h,w) at decoder resolution
+            if i == 0:
+                print(f"WaSR-T native output {tuple(logits.shape[-2:])} -> {SEG_H}x{SEG_W}")
             logits = F.interpolate(logits.float(), size=(SEG_H, SEG_W), mode="bilinear", align_corners=False)
             out[i] = softmax_c(logits[0].cpu().numpy())
-            if i == 0:
-                print(f"WaSR-T native output {tuple(model({'image': x})['out'].shape[-2:])} -> {SEG_H}x{SEG_W}")
-                model.clear_state()  # the probe call above consumed a step; restart cleanly
-                logits = model({"image": x})["out"]
-                logits = F.interpolate(logits.float(), size=(SEG_H, SEG_W), mode="bilinear", align_corners=False)
-                out[i] = softmax_c(logits[0].cpu().numpy())
     print(f"WaSR-T: {len(frames)} frames in {time.time() - t:.1f}s ({len(frames) / (time.time() - t):.1f} fps)")
     return out
 
@@ -128,15 +126,18 @@ def main() -> int:
     args = ap.parse_args()
 
     win = Path(args.window)
-    frames = np.load(win / "frames.npz")["frames"]
+    fr = np.load(win / "frames.npz")
+    frames, stamps = fr["frames"], fr["stamp_ns"]
     print(f"{win}: {len(frames)} frames {frames.shape[1:]}")
 
+    # stamp_ns travels with every per-frame output so the consumers (metrics,
+    # reflex_replay, overlays) can refuse a stale file after a re-extraction.
     if not args.skip_ewasr:
         p = run_ewasr(frames, args.ewasr_onnx)
-        np.savez_compressed(win / "probs_ewasr_offline.npz", probs=p)
+        np.savez_compressed(win / "probs_ewasr_offline.npz", probs=p, stamp_ns=stamps)
     if not args.skip_wasrt:
         p = run_wasrt(frames, args.wasrt_weights, args.wasrt_repo, args.hist_len, args.fp16)
-        np.savez_compressed(win / f"probs_wasrt_h{args.hist_len}.npz", probs=p)
+        np.savez_compressed(win / f"probs_wasrt_h{args.hist_len}.npz", probs=p, stamp_ns=stamps)
     return 0
 
 

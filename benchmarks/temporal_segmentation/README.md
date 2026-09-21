@@ -75,7 +75,7 @@ $V benchmarks/temporal_segmentation/metrics.py      --window $O/0603_glare_offax
 $V benchmarks/temporal_segmentation/make_overlay.py --window $O/0603_glare_offaxis/oak_starboard
 
 # 4. would the reflex have fired? (needs the bag again for /tf + camera_info;
-#    --obstacle-prob-min as deployed that day: 0.0 before 2026-06-09, 0.60 after)
+#    --obstacle-prob-min as deployed that day: 0.0 before 2026-06-13, 0.60 after)
 $V benchmarks/temporal_segmentation/reflex_replay.py --window $O/0603_glare_offaxis/oak_starboard \
   --bag $B/bag_2026-06-03T14.58.57_ffmpeg_seg --camera oak_starboard --obstacle-prob-min 0.0
 
@@ -84,8 +84,13 @@ benchmarks/temporal_segmentation/collect_results.sh
 ```
 
 Model files: `~/data/neural_nets/ewasr_resnet18.onnx` (the deployed model's
-source ONNX) and `~/data/neural_nets/wasr_t/{wasrt_mastr1478.pth,repo/}`
-(release weights + a clone of the upstream repo, imported as a library).
+source ONNX, eWaSR release 0.1.0 — the same file `scripts/get_model.sh`
+downloads) and `~/data/neural_nets/wasr_t/{wasrt_mastr1478.pth,repo/}`:
+the `weights` release asset of lojzezust/WaSR-T and a clone of that repo at
+commit `1b5360af2040` (master, last pushed 2023-11-29), imported as a library.
+`run_models.py` aliases two logger classes that Lightning 2.x removed so the
+upstream module imports; the alias is process-global (fine for a script, keep
+it out of anything that imports this module).
 
 ## Metrics (no ground truth)
 

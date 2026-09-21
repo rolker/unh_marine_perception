@@ -13,8 +13,11 @@ false-positive behaviour that hurts the boat:
 
   obst_frac         mean fraction of pixels classed obstacle per frame, under
                     the deployed rule (argmax == obstacle) and under the
-                    obstacle_prob_min thresholds the field used (0.7 / 0.8 /
-                    0.95 on the reflex node).
+                    obstacle_prob_min values that were in use at some point
+                    in 2026: 0.60 (reflex node since unh_echoboats_project11
+                    4ce5086, 2026-06-13), 0.7 / 0.8 (SeaSurfaceLayer costmap
+                    plugin, June), 0.95 (reflex node, 2026-08-26 seaweed
+                    mitigation). A sweep for context, not one deployed value.
   obst_frac_water   same, restricted to the per-frame "water band": rows below
                     that frame's horizon row (first row, top-down, where the
                     column-median sky probability from source A drops under
@@ -55,13 +58,28 @@ from pathlib import Path
 import numpy as np
 from scipy import ndimage
 
-THRESHOLDS = (0.7, 0.8, 0.95)
+THRESHOLDS = (0.6, 0.7, 0.8, 0.95)
 HORIZON_MARGIN_ROWS = 4
+
+
+def check_stamps(win: Path, name: str, arr: dict, frame_stamps: np.ndarray) -> None:
+    """Refuse silently-misaligned inputs: every per-frame file must describe the
+    same frame sequence as frames.npz (same length, same stamps). A window
+    re-extracted with a different range and stale probs_*.npz would otherwise
+    pair model outputs with the wrong frames by position."""
+    if "stamp_ns" not in arr:
+        raise SystemExit(f"{win}/{name}: no stamp_ns — regenerate with the current run_models.py")
+    st = arr["stamp_ns"]
+    if len(st) != len(frame_stamps) or not np.array_equal(st, frame_stamps):
+        raise SystemExit(f"{win}/{name}: stamps do not match frames.npz — re-run run_models.py for this window")
 
 
 def load_sources(win: Path) -> dict[str, np.ndarray]:
     src: dict[str, np.ndarray] = {}
+    frame_stamps = np.load(win / "frames.npz")["stamp_ns"]
     m = np.load(win / "masks.npz")
+    if len(m["stamp_ns"]) != len(frame_stamps):
+        raise SystemExit(f"{win}: masks.npz and frames.npz disagree in length — re-run extract_window.py")
     valid = m["stamp_ns"] >= 0
     a = m["masks"].astype(np.float32) / 255.0
     # A frame with no recorded mask is stored all-zero; argmax of zeros is class
@@ -71,13 +89,14 @@ def load_sources(win: Path) -> dict[str, np.ndarray]:
     src["A_recorded"] = a
     p = win / "probs_ewasr_offline.npz"
     if p.exists():
-        src["B_ewasr_offline"] = np.load(p)["probs"].astype(np.float32)
+        arr = np.load(p)
+        check_stamps(win, p.name, arr, frame_stamps)
+        src["B_ewasr_offline"] = arr["probs"].astype(np.float32)
     for p in sorted(win.glob("probs_wasrt_h*.npz")):
-        src["C_" + p.stem.replace("probs_", "")] = np.load(p)["probs"].astype(np.float32)
-    n = min(len(v) for v in src.values())
-    for k in src:
-        src[k] = src[k][:n]
-    src["_valid"] = valid[:n]
+        arr = np.load(p)
+        check_stamps(win, p.name, arr, frame_stamps)
+        src["C_" + p.stem.replace("probs_", "")] = arr["probs"].astype(np.float32)
+    src["_valid"] = valid
     return src
 
 
@@ -193,7 +212,7 @@ def main() -> int:
         w.writeheader()
         w.writerows(rows)
 
-    show = ["source", "obst_frac_water[argmax]", "interior_px", "interior_blobs", "interior_frames",
+    show = ["source", "obst_frac_water[argmax]", "obst_frac_water[p>=0.6]", "interior_px", "interior_blobs", "interior_frames",
             "flicker_water", "persist_3of4_water"]
     print("  ".join(f"{k:>24}" for k in show))
     for r in rows:

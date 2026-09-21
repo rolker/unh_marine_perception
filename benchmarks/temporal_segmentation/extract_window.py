@@ -22,9 +22,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import av
@@ -113,6 +112,7 @@ def main() -> int:
     pts_to_stamp: dict[int, int] = {}
     codec = None
     n_pkts = n_decoded = 0
+    keyframes_before_t0 = 0
     lead_start = t0 - int(GOP_LEAD_S * 1e9)
 
     def take(frame: av.VideoFrame) -> None:
@@ -135,6 +135,11 @@ def main() -> int:
             pkt = av.Packet(bytes(msg.data))
             pkt.pts = int(msg.pts)
             pts_to_stamp[int(msg.pts)] = stamp_ns(msg.header)
+            # FFMPEGPacket.flags bit 0 = keyframe (ffmpeg_image_transport). The
+            # first wanted frame must follow a keyframe or libav decodes the
+            # lead-in P-frames against nothing and emits garbage silently.
+            if (int(msg.flags) & 1) and stamp_ns(msg.header) < t0:
+                keyframes_before_t0 += 1
             for f in codec.decode(pkt):
                 take(f)
         if codec is not None:
@@ -143,6 +148,10 @@ def main() -> int:
 
     if not frames:
         print(f"error: no decodable frames in window ({n_pkts} packets read)", file=sys.stderr)
+        return 1
+    if keyframes_before_t0 == 0:
+        print(f"error: no H.265 keyframe in the {GOP_LEAD_S:.0f}s lead-in before --start; the first frames "
+              f"would be decoded without a reference. Widen GOP_LEAD_S or move --start later.", file=sys.stderr)
         return 1
 
     order = np.argsort(np.array(frame_stamps, dtype=np.int64))

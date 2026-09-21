@@ -17,6 +17,7 @@ first=1
 for d in "$ROOT"/*/oak_*; do
   [ -f "$d/probs_wasrt_h5.npz" ] || { echo "skip (no WaSR-T output): $d"; continue; }
   name="$(basename "$(dirname "$d")")_$(basename "$d")"
+  case "$name" in *[/\\\&,]*) echo "skip (unsafe window name for CSV/sed): $name"; continue;; esac
   echo "== $name"
   "$V" "$HERE/metrics.py" --window "$d"
   "$V" "$HERE/contact_sheet.py" --window "$d" --out "$RES/${name}.jpg"

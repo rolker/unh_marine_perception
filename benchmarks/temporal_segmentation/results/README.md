@@ -15,7 +15,9 @@ on the same frame. A vs B = compression effect; B vs C = model effect.
 own camera_info and TF onto the water plane in `bizzy/base_link_level` and
 applies the deployed Collision Monitor boxes: **stop** 5 m × 4 m ahead,
 ≥ 5 points; **slowdown** 20 m × 6 m, ≥ 4 points. Confidence floor as deployed
-that day (none before 2026-06-09, 0.60 after). Single camera per row — the
+that day: none until `unh_echoboats_project11` commit `4ce5086` (2026-06-13,
+"activate reflex confidence floor on BizzyBoat") set `obstacle_prob_min`
+0.60 on the reflex node; the June 3 and May 28 windows predate it. Single camera per row — the
 boat merges four, so these are lower bounds on what it saw.
 
 | window | condition | source | stop frames (episodes) | slowdown frames (episodes) |
@@ -65,7 +67,7 @@ rule: blobs per frame · share of frames with ≥ 1.
 | 06-03 16:06 fwd | 2.03 · 70% | 3.70 · 90% | 0.11 · 8% |
 | 06-17 12:37 fwd | 7.90 · 87% | 4.78 · 73% | 0.02 · 1.5% |
 | 06-22 10:12 fwd | 4.52 · 95% | 6.76 · 97% | 0.06 · 4.5% |
-| 06-25 10:40 fwd | 2.13 · 60% | 2.51 · 59% | 0.004 · 0.4% |
+| 06-25 10:40 fwd | 2.13 · 60% | 2.51 · 58% | 0.004 · 0.4% |
 | 06-22 15:10 fwd | 0.05 · 5% | 0.01 · 0.5% | 0.00 · 0% |
 | 05-28 13:44 fwd (control) | 1.41 · 70% | 1.13 · 66% | 0.65 · 49% |
 
@@ -94,5 +96,8 @@ rule: blobs per frame · share of frames with ≥ 1.
 - **05-21 "collision control" excluded**: the forward camera was already
   knocked off its mount and looking at the hull for the whole window.
 - Reflex replay is per camera; the deployed Collision Monitor sums all four.
+  Every frame in every window had a /tf sample within 38 ms (median), so the
+  nearest-sample pose approximation and the frame denominators are clean
+  (`frames_evaluated == frames`, `tf_missing == 0` in `reflex_summary.csv`).
   Config values are the tracked ones for each date; the 06-09 live shrink of
   the stop box (5×4 → 3×3 m) noted in the log is not in git and is not applied.

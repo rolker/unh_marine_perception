@@ -8,21 +8,26 @@ perception_launch.py + nav2_overlay.yaml), for each of the three sources:
 
   1. obstacle pixel  = argmax class is obstacle (R > G and R > B)
   2. confidence gate = P(obstacle) >= obstacle_prob_min (reflex: 0.60 since
-                       2026-06-09, unset = 0.0 before)
+                       unh_echoboats_project11 4ce5086, 2026-06-13; unset = 0.0 before)
   3. ray            = pinhole model from the recorded 128x96 camera_info
                        (rational-polynomial distortion, undistorted with OpenCV
                        as image_geometry::projectPixelTo3dRay does)
   4. rotate ray into `bizzy/base_link_level` using the bag's own /tf and
      /tf_static (base_link_north_up -> base_link_level and -> base_link at the
-     frame stamp; base_link -> oak_<cam> -> oak_<cam>_optical static)
+     frame stamp; base_link -> oak_<cam> -> oak_<cam>_optical static).
+     Approximation: the nearest /tf sample in time is used, where tf2 on the
+     boat interpolates between the two bracketing samples; the median sample
+     age is reported so the reader can judge it. A frame with no sample within
+     --tf-tol-s is NOT evaluated and is excluded from every rate below
+     (reported as tf_missing).
   5. intersect the plane z = projection_plane_z (0.0 as deployed); drop rays
      that miss or point away
   6. count points inside the CollisionStop box ([0,5] x [-2,2] m, min_points 5)
      and the CollisionSlowdown box ([0,20] x [-3,3] m, min_points 4)
 
-Reports per source: share of frames that would have triggered stop / slowdown,
-number of distinct trigger episodes (runs of consecutive triggering frames),
-and per-frame counts to timeseries_reflex.csv. Single camera only: the boat
+Reports per source: share of EVALUATED frames that would have triggered stop /
+slowdown, number of distinct trigger episodes (runs of consecutive triggering
+frames), and per-frame counts to timeseries_reflex.csv (-1 = not evaluated). Single camera only: the boat
 merges all four cameras into one cloud, so a per-camera count is a lower bound
 on what the boat would have seen.
 
@@ -134,16 +139,24 @@ def main() -> int:
     stamps = fr["stamp_ns"]
     n = len(stamps)
     mk = np.load(win / "masks.npz")
+    if len(mk["stamp_ns"]) != n:
+        raise SystemExit(f"{win}: masks.npz and frames.npz disagree in length — re-run extract_window.py")
     a = mk["masks"].astype(np.float32) / 255.0
     a[mk["stamp_ns"] < 0] = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     sources = {"A_recorded": a}
+
+    def load_probs(path: Path) -> np.ndarray:
+        arr = np.load(path)
+        # Refuse a stale file: outputs must describe exactly this frame sequence.
+        if "stamp_ns" not in arr or not np.array_equal(arr["stamp_ns"], stamps):
+            raise SystemExit(f"{path}: stamps do not match frames.npz — re-run run_models.py for this window")
+        return arr["probs"].astype(np.float32)
+
     p = win / "probs_ewasr_offline.npz"
     if p.exists():
-        sources["B_ewasr_offline"] = np.load(p)["probs"].astype(np.float32)
+        sources["B_ewasr_offline"] = load_probs(p)
     for p in sorted(win.glob("probs_wasrt_h*.npz")):
-        sources["C_" + p.stem.replace("probs_", "")] = np.load(p)["probs"].astype(np.float32)
-    for k in sources:
-        sources[k] = sources[k][:n]
+        sources["C_" + p.stem.replace("probs_", "")] = load_probs(p)
 
     ci, T_base_opt, lvl, base = load_geometry(find_mcap(args.bag), args.namespace, args.camera, int(stamps[0]), int(stamps[-1]))
     lvl_st = np.array([s for s, _ in lvl], dtype=np.int64)
@@ -174,16 +187,18 @@ def main() -> int:
         x, y = pts[:, 0], pts[:, 1]
         return int(((x >= box[0]) & (x <= box[1]) & (y >= box[2]) & (y <= box[3])).sum())
 
-    counts = {k: np.zeros((n, 2), dtype=int) for k in sources}  # stop, slow
+    counts = {k: np.full((n, 2), -1, dtype=int) for k in sources}  # stop, slow; -1 = not evaluated
     nearest_x = {k: np.full(n, np.nan) for k in sources}
-    tf_missing = 0
+    evaluated = np.zeros(n, dtype=bool)
+    tf_age = np.full(n, np.nan)
     for i in range(n):
         t = int(stamps[i])
         T_nu_lvl, age1 = nearest(lvl, lvl_st, t)
         T_nu_base, age2 = nearest(base, base_st, t)
-        if max(age1, age2) > args.tf_tol_s:
-            tf_missing += 1
+        tf_age[i] = max(age1, age2)
+        if tf_age[i] > args.tf_tol_s:
             continue
+        evaluated[i] = True
         T_lvl_opt = np.linalg.inv(T_nu_lvl) @ T_nu_base @ T_base_opt
         for k, probs in sources.items():
             pr = probs[i]
@@ -199,14 +214,20 @@ def main() -> int:
         f = flags.astype(int)
         return int(((f[1:] == 1) & (f[:-1] == 0)).sum() + (1 if len(f) and f[0] else 0))
 
+    n_eval = int(evaluated.sum())
+    tf_missing = n - n_eval
+    if n_eval == 0:
+        raise SystemExit(f"{win}: no frame had a /tf sample within {args.tf_tol_s}s — nothing evaluated")
     rows = []
     for k in sources:
-        stop = counts[k][:, 0] >= STOP[4]
-        slow = counts[k][:, 1] >= SLOW[4]
+        stop = (counts[k][:, 0] >= STOP[4]) & evaluated
+        slow = (counts[k][:, 1] >= SLOW[4]) & evaluated
         rows.append({
-            "source": k, "frames": n, "obstacle_prob_min": args.obstacle_prob_min,
-            "stop_frames": int(stop.sum()), "stop_frac": float(stop.mean()), "stop_episodes": episodes(stop),
-            "slow_frames": int(slow.sum()), "slow_frac": float(slow.mean()), "slow_episodes": episodes(slow),
+            "source": k, "frames": n, "frames_evaluated": n_eval, "tf_missing": tf_missing,
+            "tf_age_median_s": float(np.nanmedian(tf_age[evaluated])),
+            "obstacle_prob_min": args.obstacle_prob_min,
+            "stop_frames": int(stop.sum()), "stop_frac": float(stop.sum() / n_eval), "stop_episodes": episodes(stop),
+            "slow_frames": int(slow.sum()), "slow_frac": float(slow.sum() / n_eval), "slow_episodes": episodes(slow),
             "median_nearest_x_m": float(np.nanmedian(nearest_x[k])) if np.isfinite(nearest_x[k]).any() else float("nan"),
         })
     with open(win / "reflex.csv", "w", newline="") as fp:
@@ -220,8 +241,9 @@ def main() -> int:
             wri.writerow([i, int(stamps[i])] + [int(v) for k in sources for v in counts[k][i]])
 
     cam_h = (np.linalg.inv(lvl[0][1]) @ base[0][1] @ T_base_opt)[2, 3]
-    print(f"{win.parent.name}/{win.name}: {n} frames, camera {cam_h:.2f} m above plane z={args.plane_z}, "
-          f"obstacle_prob_min={args.obstacle_prob_min}, tf missing {tf_missing}")
+    print(f"{win.parent.name}/{win.name}: {n} frames, {n_eval} evaluated ({tf_missing} without /tf within "
+          f"{args.tf_tol_s}s, median tf sample age {rows[0]['tf_age_median_s'] * 1e3:.0f} ms), camera {cam_h:.2f} m "
+          f"above plane z={args.plane_z}, obstacle_prob_min={args.obstacle_prob_min}")
     print(f"{'source':>18} {'stop frames':>12} {'stop %':>7} {'episodes':>9} {'slow frames':>12} {'slow %':>7} {'episodes':>9}")
     for r in rows:
         print(f"{r['source']:>18} {r['stop_frames']:>12} {100 * r['stop_frac']:>7.1f} {r['stop_episodes']:>9} "

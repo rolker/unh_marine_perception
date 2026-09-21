@@ -73,6 +73,7 @@ unh_marine_perception/
 │   ├── config/README.md          # detailed node/plugin parameter reference
 │   └── test/                     # 7 gtests + 2 launch_testing + fixtures/issue17_obstacle_approach/
 ├── benchmarks/h265_transport/    # JPEG-vs-H.265 bandwidth/quality study (#2), not built by colcon
+├── benchmarks/temporal_segmentation/  # offline WaSR-T vs eWaSR comparison on recorded footage (#49, for #42)
 └── docs/perception_capability_report.md  # plain-language capability snapshot + figures
 ```
 
