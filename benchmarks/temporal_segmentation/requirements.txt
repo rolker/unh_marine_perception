@@ -1,0 +1,24 @@
+# Separate venv for this benchmark (NOT the workspace .venv — torch pins are
+# heavy and WaSR-T's own requirements.txt pins a 2021 torch that no longer
+# installs; the shim in run_models.py covers the one Lightning API it needs).
+#
+#   python3 -m venv ~/data/neural_nets/wasr_t/.venv
+#   ~/data/neural_nets/wasr_t/.venv/bin/pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+#   ~/data/neural_nets/wasr_t/.venv/bin/pip install -r benchmarks/temporal_segmentation/requirements.txt
+#
+# torch/torchvision are pinned to the CUDA 12.4 builds the results were made
+# with (torch 2.6.0+cu124); onnxruntime-gpu is pinned to the last CUDA 12 build: 1.30+ is built against
+# CUDA 13 and silently falls back to the CPU provider (~1 fps) on a CUDA 12
+# torch install. run_models.py imports torch before onnxruntime so the
+# pip-installed CUDA/cuDNN libraries are already loaded.
+onnxruntime-gpu==1.22.0
+onnx
+pytorch-lightning
+av
+mcap
+mcap-ros2-support
+opencv-python-headless
+scipy
+numpy
+pillow
+tqdm
